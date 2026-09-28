@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Approach Analyzer</title>
+  <link rel="stylesheet" href="vendor/uPlot.min.css">
+  <link rel="stylesheet" href="style.css">
+  <script src="vendor/uPlot.iife.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="brand">Approach Analyzer</div>
+    <nav>
+      <button data-view="timeline" class="on">Timeline</button>
+      <button data-view="compare">Compare</button>
+    </nav>
+    <button id="libraryBtn" class="library-btn" title="Video library: open, add or remove videos">
+      <span class="ico">☰</span><span id="currentLabel">Videos</span><span class="caret">▾</span>
+    </button>
+    <button id="importBtn" class="import-btn" title="Add videos">＋ Add videos</button>
+    <div class="spacer"></div>
+    <div class="exports">
+      <a id="exportCsv" href="#">CSV</a>
+      <a id="exportParquet" href="#">Parquet</a>
+    </div>
+  </header>
+
+  <main id="timeline">
+    <section class="left">
+      <div class="stage">
+        <canvas id="frame"></canvas>
+        <canvas id="inset" title="Click to swap follow cam / full frame"></canvas>
+        <button id="mode" class="mode" title="Toggle follow cam (f)">Follow cam</button>
+        <div id="loading" class="loading">Loading…</div>
+      </div>
+      <div class="scrubwrap">
+        <div id="eventTicks" class="eventticks"></div>
+        <div id="phaseStrip" class="phasestrip"></div>
+        <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Frame">
+      </div>
+      <div class="transport">
+        <button id="prev" title="Previous frame (←)">◀︎</button>
+        <button id="play" title="Play (space)">▶</button>
+        <button id="next" title="Next frame (→)">▶︎</button>
+        <select id="rate" title="Playback speed ([ and ])" aria-label="Playback speed">
+          <option value="0.2">0.2×</option>
+          <option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option>
+          <option value="0.75">0.75×</option>
+          <option value="1" selected>1×</option>
+        </select>
+        <label class="slowmo" title="Replay continuously (l)">
+          <input id="loop" type="checkbox" checked> loop</label>
+        <label class="slowmo" title="Drop to 0.25× while a sudden movement is happening">
+          <input id="slowmo" type="checkbox" checked> slow-mo on events</label>
+        <div id="frameInfo" class="frameinfo mono"></div>
+      </div>
+      <div id="layers" class="layers">
+        <label><input type="checkbox" name="skeleton"> Skeleton</label>
+        <label><input type="checkbox" name="board"> Board</label>
+        <label><input type="checkbox" name="com"> CoM</label>
+        <label title="Green dashed line along the left edge of the white mat. It's the reference for the rider's line across the slope. Shown in full-frame view (press f)."><input type="checkbox" name="matEdge"> Mat edge</label>
+        <label title="The rider's bounding box. Always drawn in the follow cam, where it turns red or amber during a sudden movement. This checkbox adds it in full-frame view."><input type="checkbox" name="bbox"> Box</label>
+      </div>
+      <p class="hint">← → 1 frame · , . 10 frames · space play · [ ] speed · l loop · f follow cam · click an event to replay it</p>
+    </section>
+
+    <div id="splitter" class="splitter" role="separator" aria-orientation="vertical"
+      title="Drag to resize the video and analysis columns · double-click to reset"><i></i></div>
+
+    <section class="right">
+      <div id="qa" class="qa"></div>
+      <div class="card result">
+        <h2>Analysis result</h2>
+        <div id="jump" class="jump"></div>
+        <div id="eventSummary" class="event-summary"></div>
+        <ol id="events" class="events"></ol>
+      </div>
+      <details class="card readout-card">
+        <summary>Values at this frame</summary>
+        <div id="readout" class="readout"></div>
+      </details>
+      <div id="charts" class="charts"></div>
+      <p class="legend-note">
+        Background bands show the phases. The tinted envelope is <code>err_est</code>. Dashed lines are degraded,
+        and grey lines are invalid for this camera geometry. Red bands mark the sudden movements
+        listed in the Analysis result panel.
+      </p>
+    </section>
+  </main>
+
+  <main id="compare" hidden></main>
+
+  <div id="libraryScrim" class="scrim" hidden></div>
+  <aside id="library" class="library" aria-hidden="true" aria-label="Video library">
+    <div class="lib-head">
+      <h2>Videos <span id="libraryCount" class="muted"></span></h2>
+      <button id="libraryClose" class="x" aria-label="Close">✕</button>
+    </div>
+    <button id="libraryAdd" class="primary wide">＋ Add videos</button>
+    <input id="librarySearch" type="search" placeholder="Filter by date or file name" aria-label="Filter videos">
+    <div id="libraryList" class="lib-list"></div>
+    <div class="lib-drop">Drop videos or folders anywhere on this panel to add them</div>
+    <div id="libraryToast" class="toast" hidden></div>
+  </aside>
+
+  <dialog id="importDlg" class="import">
+    <div class="ihead">
+      <h2>Import videos</h2>
+      <button id="importClose" class="x" aria-label="Close">✕</button>
+    </div>
+    <div class="itabs">
+      <button data-tab="upload" class="on">Choose a folder</button>
+      <button data-tab="local">Browse this computer</button>
+    </div>
+    <section id="importTabUpload">
+      <div id="importDrop" class="drop">
+        <div>Drop a folder or video files here</div>
+        <div class="or">or</div>
+        <div class="picks">
+          <button id="importPickDir" class="primary">Choose folder…</button>
+          <button id="importPickFiles">Choose files…</button>
+        </div>
+        <div class="muted small">.mov · .mp4 · .m4v. Subfolders are included, and the videos are copied into the app's data folder.</div>
+      </div>
+      <input id="importDirInput" type="file" webkitdirectory directory multiple hidden>
+      <input id="importFileInput" type="file" accept=".mov,.mp4,.m4v,video/*" multiple hidden>
+    </section>
+    <section id="importTabLocal" hidden>
+      <div class="pathbar">
+        <input id="importPath" type="text" spellcheck="false" aria-label="Folder path">
+        <button id="importGoPath">Go</button>
+      </div>
+      <div id="importBrowse" class="browse"></div>
+      <button id="importAddFolder" class="primary wide" disabled>Add videos from this folder</button>
+      <div class="muted small">The videos are processed where they are, without being copied.</div>
+    </section>
+    <div class="ilist-head">
+      <b>Videos</b>
+      <button id="importClear" class="link">clear list</button>
+    </div>
+    <div id="importList" class="ilist"></div>
+    <div class="ifoot">
+      <label>Session <input id="importSession" type="text" placeholder="auto: by recording date"
+        title="Clips in one session share the venue calibration. Leave empty to group by recording date."></label>
+      <button id="importGo" class="primary" disabled>Import</button>
+    </div>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

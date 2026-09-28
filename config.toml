@@ -1,0 +1,62 @@
+# sbanalyze configuration. The resolved config hash is recorded with every run (N-4).
+
+[paths]
+data_dir = "data"                 # relative to the project root; gitignored
+
+[rider]
+stature_m = 1.75
+# Fraction of stature spanned by the ankle->knee->hip->neck->head-top chain (de Leva / Winter
+# landmark heights). The chain length is crouch-invariant, which makes it a stable scale reference.
+chain_fraction = 0.96
+# Distance between binding centres (foot-keypoint centroids). Drives board_yaw.
+stance_width_m = 0.52
+# "auto" detects regular/goofy per run (lead foot + toe direction). Force "regular" or "goofy"
+# if you know it; a run ridden switch is then read with that stance.
+stance = "auto"
+
+[camera]
+# Focal length in pixels for the rotated (portrait) frame. iPhone main camera, 4K video:
+# 26 mm equivalent over a 43.3 mm diagonal -> ~2650 px across a 4406 px diagonal.
+focal_px = 2650.0
+focal_ref_long_edge = 3840        # focal_px applies to this frame size; other sizes scale it
+# Used only when too few vertical lines are visible to measure pitch from the vanishing point.
+pitch_deg_fallback = 18.0
+
+[air]
+max_flight_s = 2.5                # how long to keep tracking past the run window
+settle_s = 0.5                    # frames kept after touchdown
+
+[events]
+k_mad = 5.0                       # adaptive threshold: robust deviations above typical rate
+
+[trim]
+analysis_width = 540              # quarter resolution for motion energy
+background_samples = 15
+diff_threshold = 28
+min_blob_frac = 0.00015           # of the frame area; the rider at the lip is small
+pad_s = 0.25
+
+[detect]
+mode = "balanced"                 # rtmlib: lightweight | balanced | performance
+det_every = 1
+crop_margin = 1.8                 # crop around the tracked box, as a multiple of box size
+min_crop_px = 480
+
+[metrics]
+kpt_conf_threshold = 0.35
+butter_cutoff_hz = 8.0
+butter_order = 2
+savgol_window_s = 0.25
+savgol_order = 2
+keypoint_noise_px = 3.0           # 1-sigma keypoint noise used to propagate err_est
+
+[phase]
+yaw_rate_enter_dps = 90.0         # |d board_yaw / dt| that starts the transition
+yaw_settle_deg = 30.0             # board within this angle of the fall line = takeoff run
+settle_s = 0.15
+min_phase_s = 0.2
+
+[render]
+long_edge_px = 1080
+follow_size = [720, 960]          # follow-cam crop (w, h), rider kept centred
+jpeg_quality = 85

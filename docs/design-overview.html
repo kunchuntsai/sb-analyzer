@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snowboard approach analyzer — architecture &amp; design</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --snow:#EDF1F4; --card:#FFFFFF; --ink:#0F1F2B; --slate:#5C7284;
+  --piste:#1F5FA8; --piste-soft:#E3ECF6; --flag:#E8590C; --flag-soft:#FCEBDF;
+  --line:#CBD6DE; --line-soft:#E0E8ED;
+  --p1:#2E7D6B; --p2:#B07A12; --p3:#B03A2E;
+  --p1s:#DCEDE7; --p2s:#F7EBD2; --p3s:#F8E1DD;
+  --maxw:1080px;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --snow:#0C171F; --card:#12212C; --ink:#E4ECF1; --slate:#8FA6B6;
+    --piste:#6FAEEA; --piste-soft:#15293B; --flag:#FF8A4C; --flag-soft:#2A1D14;
+    --line:#27394A; --line-soft:#1C2C39;
+    --p1:#5FBFA6; --p2:#E0AC4A; --p3:#E8776A;
+    --p1s:#12302A; --p2s:#302716; --p3s:#301A18;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}*{animation:none!important;transition:none!important}}
+body{margin:0;background:var(--snow);color:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:16.5px;line-height:1.65;-webkit-font-smoothing:antialiased}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+a{color:var(--piste)}
+a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--flag);outline-offset:3px}
+code{font-family:"IBM Plex Mono",monospace;font-size:.88em}
+
+.display{font-family:Archivo,sans-serif;font-weight:800;letter-spacing:-.03em;line-height:1.02}
+.tag{font-family:"IBM Plex Mono",monospace;font-size:12px;font-weight:500;letter-spacing:.14em;text-transform:uppercase;color:var(--slate)}
+.mono{font-family:"IBM Plex Mono",monospace}
+
+.hero{padding:70px 0 40px;border-bottom:1px solid var(--line)}
+.hero h1{margin:14px 0 0;font-size:clamp(36px,6.4vw,68px)}
+.hero h1 em{font-style:normal;color:var(--piste)}
+.thesis{margin:22px 0 0;max-width:58ch;font-size:19px}
+.meta{display:flex;flex-wrap:wrap;gap:8px 26px;margin-top:30px}
+.meta div{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--slate)}
+.meta b{display:block;font-weight:500;color:var(--ink);letter-spacing:0}
+
+.demo{margin:44px 0 0;background:var(--card);border:1px solid var(--line);border-radius:2px}
+.demo-head{display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;align-items:baseline;padding:18px 22px;border-bottom:1px solid var(--line-soft)}
+.demo-head p{margin:0;font-size:14.5px;color:var(--slate);max-width:54ch}
+.demo-body{padding:12px 22px 22px}
+svg.frame{width:100%;height:auto;display:block}
+.ctl{display:flex;align-items:center;gap:16px;padding:14px 0 4px;border-top:1px solid var(--line-soft);margin-top:8px;flex-wrap:wrap}
+.ctl label{font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--slate)}
+input[type=range]{flex:1;min-width:180px;accent-color:var(--flag)}
+.readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:1px;background:var(--line-soft);border:1px solid var(--line-soft);margin-top:16px}
+.readout div{background:var(--card);padding:13px 15px}
+.readout span{display:block;font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--slate)}
+.readout strong{font-family:Archivo,sans-serif;font-weight:600;font-size:23px;letter-spacing:-.02em}
+.readout .hl strong{color:var(--flag)}
+.assume{margin:14px 0 0;font-size:12.5px;color:var(--slate);font-family:"IBM Plex Mono",monospace;line-height:1.5}
+
+section{padding:64px 0;border-bottom:1px solid var(--line)}
+section:last-of-type{border-bottom:0}
+.shead{display:grid;grid-template-columns:64px 1fr;gap:0 18px;align-items:baseline;margin-bottom:34px}
+.shead .num{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--flag);letter-spacing:.08em;padding-top:6px}
+.shead h2{margin:0;font-family:Archivo,sans-serif;font-weight:600;font-size:clamp(26px,3.6vw,36px);letter-spacing:-.02em;line-height:1.15}
+.shead p{grid-column:2;margin:10px 0 0;color:var(--slate);max-width:62ch;font-size:16px}
+.body{margin-left:0}
+@media(min-width:760px){.body{margin-left:82px}}
+.body p{max-width:68ch}
+.body h3{font-family:Archivo,sans-serif;font-weight:600;font-size:19px;letter-spacing:-.01em;margin:34px 0 8px}
+
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);border:1px solid var(--line)}
+.facts div{background:var(--card);padding:16px 18px}
+.facts span{display:block;font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--slate);margin-bottom:4px}
+.facts b{font-family:Archivo,sans-serif;font-weight:600;font-size:20px;letter-spacing:-.02em}
+.facts i{font-style:normal;display:block;font-size:13px;color:var(--slate)}
+
+.phases{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);margin:8px 0 0}
+.ph{background:var(--card);padding:22px 20px;border-left:4px solid var(--line)}
+.ph.a{border-left-color:var(--p1)}
+.ph.b{border-left-color:var(--p2)}
+.ph.c{border-left-color:var(--p3)}
+.ph .when{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--slate);letter-spacing:.06em}
+.ph h3{margin:5px 0 8px;font-family:Archivo,sans-serif;font-weight:600;font-size:20px;letter-spacing:-.01em}
+.ph p{margin:0 0 12px;font-size:15.5px;color:var(--slate);max-width:62ch}
+.ph ul{margin:0;padding-left:18px;font-size:15px}
+.ph li{margin-bottom:3px}
+.ph .kill{color:var(--slate)}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1px;background:var(--line);border:1px solid var(--line)}
+.cards article{background:var(--card);padding:22px 20px}
+.cards h3{font-family:Archivo,sans-serif;font-weight:600;font-size:17px;margin:8px 0 8px;letter-spacing:-.01em}
+.cards p{margin:0;font-size:15px;color:var(--slate)}
+.cards p.verdict{margin-top:12px;color:var(--ink);font-size:14.5px;border-left:2px solid var(--flag);padding-left:11px}
+
+.pipe{display:grid;gap:1px;background:var(--line);border:1px solid var(--line)}
+.stage{background:var(--card);display:grid;grid-template-columns:56px 1fr;gap:0 16px;padding:20px}
+@media(min-width:760px){.stage{grid-template-columns:56px 1fr 200px;align-items:start}}
+.stage .idx{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--piste);padding-top:3px}
+.stage h3{margin:0 0 5px;font-family:Archivo,sans-serif;font-weight:600;font-size:19px;letter-spacing:-.01em}
+.stage p{margin:0;font-size:15.5px;color:var(--slate);max-width:60ch}
+.stage .owns{grid-column:2;margin-top:12px;font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--ink);background:var(--piste-soft);display:inline-block;justify-self:start;padding:4px 9px}
+@media(min-width:760px){.stage .owns{grid-column:3;margin-top:3px;justify-self:end;text-align:right}}
+.stage.key{background:var(--flag-soft)}
+.stage.key .idx{color:var(--flag)}
+.stage.key .owns{background:var(--card)}
+
+ul.plain{list-style:none;padding:0;margin:16px 0}
+ul.plain li{padding:11px 0 11px 26px;border-top:1px solid var(--line-soft);position:relative;font-size:15.5px}
+ul.plain li:last-child{border-bottom:1px solid var(--line-soft)}
+ul.plain li::before{content:"";position:absolute;left:4px;top:20px;width:9px;height:1.5px;background:var(--flag)}
+ul.plain b{font-weight:500}
+table{width:100%;border-collapse:collapse;margin:18px 0;font-size:14.5px}
+th,td{text-align:left;padding:10px 12px 10px 0;border-bottom:1px solid var(--line-soft);vertical-align:top}
+th{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--slate);font-weight:500;border-bottom:1px solid var(--line)}
+td.m{font-family:"IBM Plex Mono",monospace;font-size:13px}
+td.v{font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase;white-space:nowrap}
+.ok{color:var(--p1)} .mid{color:var(--p2)} .no{color:var(--p3)}
+.tblwrap{overflow-x:auto}
+pre{background:var(--card);border:1px solid var(--line);padding:16px 18px;overflow-x:auto;font-family:"IBM Plex Mono",monospace;font-size:13px;line-height:1.7;margin:18px 0}
+.note{border-left:2px solid var(--flag);padding:2px 0 2px 16px;margin:22px 0;font-size:15.5px;max-width:62ch}
+
+footer{padding:52px 0 70px}
+footer h2{font-family:Archivo,sans-serif;font-weight:600;font-size:16px;margin:0 0 16px}
+footer ol{margin:0;padding-left:20px;font-size:14.5px;color:var(--slate)}
+footer li{margin-bottom:7px}
+.caveat{margin-top:30px;font-size:13.5px;color:var(--slate);max-width:66ch}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="tag">Design proposal · single camera · dry-slope airbag jump</div>
+    <h1 class="display">Two and a half<br>seconds, <em>three<br>phases, one lens</em></h1>
+    <p class="thesis">A video analyzer for snowboard jump approaches. Analysis runs from drop-in to takeoff and stops there. What the system can measure changes phase by phase, because the rider's direction of travel rotates away from the camera as they go.</p>
+    <div class="meta">
+      <div><b>Target</b>MacBook Pro, Apple silicon</div>
+      <div><b>Source</b>3840×2160 HEVC, 60 fps, rot −90</div>
+      <div><b>Run window</b>≈2.5 s of a 15 s clip</div>
+      <div><b>Scope</b>Ends at takeoff</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">
+        <div class="tag">Precision across the run</div>
+        <p>Rider pixel-height measured from the sample clip at three points and interpolated between. Scrub to see which metrics hold at each moment.</p>
+      </div>
+      <div class="demo-body">
+        <svg class="frame" viewBox="0 0 560 230" role="img" aria-labelledby="rt rd">
+          <title id="rt">Rider pixel height and phase bands across the run</title>
+          <desc id="rd">Rider height in frame falls from roughly 940 pixels at drop-in to about 205 pixels at takeoff, roughly a fivefold loss of resolution, while the run passes through drop-in, transition and takeoff-run phases.</desc>
+          <rect x="40" y="16" width="115" height="20" fill="var(--p1s)"/>
+          <rect x="155" y="16" width="212" height="20" fill="var(--p2s)"/>
+          <rect x="367" y="16" width="138" height="20" fill="var(--p3s)"/>
+          <text x="46" y="30" fill="var(--p1)" font-family="IBM Plex Mono, monospace" font-size="10">DROP-IN</text>
+          <text x="161" y="30" fill="var(--p2)" font-family="IBM Plex Mono, monospace" font-size="10">TRANSITION</text>
+          <text x="373" y="30" fill="var(--p3)" font-family="IBM Plex Mono, monospace" font-size="10">TAKEOFF RUN</text>
+
+          <line x1="40" y1="196" x2="520" y2="196" stroke="var(--line)" stroke-width="1"/>
+          <path id="hcurve" d="" fill="none" stroke="var(--piste)" stroke-width="2"/>
+          <g id="anchors"></g>
+          <line id="head" x1="0" y1="44" x2="0" y2="204" stroke="var(--flag)" stroke-width="1.6"/>
+          <circle id="dot" cx="0" cy="0" r="4" fill="var(--flag)"/>
+          <line x1="505" y1="16" x2="505" y2="204" stroke="var(--ink)" stroke-width="1" stroke-dasharray="3 3"/>
+          <text x="498" y="218" fill="var(--slate)" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="10">takeoff</text>
+          <text x="40" y="218" fill="var(--slate)" font-family="IBM Plex Mono, monospace" font-size="10">3.95 s</text>
+          <text x="14" y="60" fill="var(--slate)" font-family="IBM Plex Mono, monospace" font-size="10">1000</text>
+          <text x="26" y="199" fill="var(--slate)" font-family="IBM Plex Mono, monospace" font-size="10">0</text>
+          <text x="14" y="118" fill="var(--slate)" font-family="IBM Plex Mono, monospace" font-size="10">px</text>
+        </svg>
+
+        <div class="ctl">
+          <label for="tt">Time in run</label>
+          <input id="tt" type="range" min="3.95" max="6.45" value="4.50" step="0.05" aria-describedby="ttVal">
+          <span id="ttVal" class="mono" style="min-width:58px;text-align:right">4.50 s</span>
+        </div>
+
+        <div class="readout">
+          <div><span>Phase</span><strong id="oPh" style="font-size:18px">Drop-in</strong></div>
+          <div><span>Rider height</span><strong id="oPx">790 px</strong></div>
+          <div><span>Ground sampling</span><strong id="oMm">2.2 mm/px</strong></div>
+          <div class="hl"><span>CoM precision</span><strong id="oErr">±0.7 cm</strong></div>
+          <div><span>Fore/aft balance</span><strong id="oFa" style="font-size:18px">Usable</strong></div>
+        </div>
+        <p class="assume">rider height measured at 4.50 s (790 px), 5.20 s (425 px) and 6.30 s (220 px) from the sample clip<br>ground sampling = 1750 mm ÷ rider pixel height, assuming 1.75 m stature · precision at 3 px keypoint noise</p>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<section id="clip">
+  <div class="wrap">
+    <div class="shead">
+      <div class="num">01</div>
+      <h2>What the footage actually is</h2>
+      <p>Measured from the sample clip rather than assumed. Several of these numbers changed the design.</p>
+    </div>
+    <div class="body" style="margin-left:0">
+      <div class="facts">
+        <div><span>Frame</span><b>2160 × 3840</b><i>portrait after −90 rotation</i></div>
+        <div><span>Rate</span><b>59.97 fps</b><i>HEVC Main, ~64 Mb/s</i></div>
+        <div><span>Clip length</span><b>15.0 s</b><i>904 frames</i></div>
+        <div><span>Rider present</span><b>3.95 – 6.45 s</b><i>≈150 frames, 17% of clip</i></div>
+        <div><span>Lighting</span><b>Night, floodlit</b><i>no measurable flicker</i></div>
+        <div><span>Camera</span><b>Static</b><i>background locked across clip</i></div>
+      </div>
+      <div class="note">Four thousand pixels on the long axis is a much larger budget than a typical phone clip. The rider spans roughly 790 px at drop-in and still 205 px at takeoff, which is enough for pose estimation throughout. That is the single most encouraging fact in the whole clip.</div>
+      <p>A brightness trace over a static patch shows a coefficient of variation of 0.4% with no dominant peak, so the floodlights are not beating against the 60 fps capture. Flicker correction is not needed.</p>
+    </div>
+  </div>
+</section>
+
+<section id="phases">
+  <div class="wrap">
+    <div class="shead">
+      <div class="num">02</div>
+      <h2>The three phases</h2>
+      <p>Phase is the organizing unit of the whole system. Metrics are computed per phase, compared per phase, and charted with phase bands. Analysis stops at takeoff.</p>
+    </div>
+    <div class="body" style="margin-left:0">
+      <div class="phases">
+        <div class="ph a">
+          <div class="when">≈ 3.95 – 4.55 s · rider 940 → 760 px</div>
+          <h3>Drop-in</h3>
+          <p>Rider enters from the right of frame, close to camera, travelling across the image rather than into it. Best resolution of the whole run and the most favourable geometry.</p>
+          <ul>
+            <li>Initial stance and knee flexion at entry</li>
+            <li>Fore/aft CoM — board's long axis is across the frame here</li>
+            <li>Entry speed and line onto the mat</li>
+          </ul>
+        </div>
+        <div class="ph b">
+          <div class="when">≈ 4.55 – 5.70 s · rider 760 → 330 px</div>
+          <h3>Transition · edge change</h3>
+          <p>The arc across the mat and the switch of edge. The rider's board rotates from across-frame to into-frame through this phase, so measurement quality degrades continuously rather than at a step.</p>
+          <ul>
+            <li>Edge-change timing and duration</li>
+            <li>Compression and extension through the arc</li>
+            <li>Shoulder–hip separation building into the run-out</li>
+            <li class="kill">Fore/aft becomes progressively less trustworthy</li>
+          </ul>
+        </div>
+        <div class="ph c">
+          <div class="when">≈ 5.70 – 6.45 s · rider 330 → 205 px</div>
+          <h3>Takeoff run</h3>
+          <p>Straight line to the lip. Board points down the optical axis, so the depth-aligned quantities are gone. Lowest resolution of the run, and the phase you most want to measure.</p>
+          <ul>
+            <li>Final stance, trunk lean, arm position</li>
+            <li>Pre-pop compression and the extension into the lip</li>
+            <li>Line offset from the mat centreline</li>
+            <li class="kill">Fore/aft and board pitch unavailable</li>
+          </ul>
+        </div>
+      </div>
+      <div class="note">Nothing after the board leaves the lip is in scope. That simplifies the system considerably: no ballistic model, no airborne rotation tracking, no landing detection. Takeoff is a terminator, not a transition.</div>
+    </div>
+  </div>
+</section>
+
+<section id="geom">
+  <div class="wrap">
+    <div class="shead">
+      <div class="num">03</div>
+      <h2>Metric validity by phase</h2>
+      <p>The rider stands sideways on the board, so their sagittal plane faces the camera and flexion angles hold throughout. What changes is everything aligned with the board's long axis.</p>
+    </div>
+    <div class="body">
+      <div class="tblwrap">
+      <table>
+        <thead><tr><th>Metric</th><th>Drop-in</th><th>Transition</th><th>Takeoff run</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td class="m">knee_flex_l/r</td><td class="v ok">Good</td><td class="v ok">Good</td><td class="v mid">Fair</td><td>Resolution-limited late, not geometry-limited</td></tr>
+          <tr><td class="m">ankle_dorsi_l/r</td><td class="v ok">Good</td><td class="v mid">Fair</td><td class="v mid">Fair</td><td>Small segment, first to suffer as pixels drop</td></tr>
+          <tr><td class="m">trunk_lean</td><td class="v ok">Good</td><td class="v ok">Good</td><td class="v ok">Good</td><td>Large segment, robust at low resolution</td></tr>
+          <tr><td class="m">com_height</td><td class="v ok">Good</td><td class="v ok">Good</td><td class="v ok">Good</td><td>Vertical stays perpendicular to the optical axis</td></tr>
+          <tr><td class="m">com_lateral</td><td class="v ok">Good</td><td class="v ok">Good</td><td class="v ok">Good</td><td>Cross-slope axis lies across the frame</td></tr>
+          <tr><td class="m">com_foreaft</td><td class="v ok">Good</td><td class="v mid">Degrading</td><td class="v no">Lost</td><td>Rotates into depth through the run</td></tr>
+          <tr><td class="m">board_pitch</td><td class="v ok">Good</td><td class="v mid">Degrading</td><td class="v no">Lost</td><td>Same axis as fore/aft</td></tr>
+          <tr><td class="m">board_yaw</td><td class="v ok">Good</td><td class="v ok">Good</td><td class="v mid">Fair</td><td>Reads as apparent board foreshortening</td></tr>
+          <tr><td class="m">line_offset</td><td class="v ok">Good</td><td class="v ok">Good</td><td class="v ok">Good</td><td>Ground homography handles it at any depth</td></tr>
+          <tr><td class="m">speed_along</td><td class="v mid">Fair</td><td class="v ok">Good</td><td class="v ok">Good</td><td>Improves as the path aligns with the mat axis</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>Fore/aft balance is not uniformly unavailable, as an earlier read of the still frame suggested. It is good at drop-in, degrades through the transition, and is gone by the takeoff run. Report it with the phase attached and suppress it in phase three rather than dropping it from the system.</p>
+    </div>
+  </div>
+</section>
+
+<section id="findings">
+  <div class="wrap">
+    <div class="shead">
+      <div class="num">04</div>
+      <h2>Tool decisions</h2>
+      <p>Four choices worth researching, two of which the footage revised.</p>
+    </div>
+    <div class="cards">
+      <article>
+        <div class="tag">Pose model</div>
+        <h3>RTMPose over MediaPipe</h3>
+        <p>Recent comparisons put RTMPose highest on overall accuracy, with MediaPipe fastest on processing speed. RTMPose, Sapiens and ViTPose are the most robust as conditions vary.</p>
+        <p class="verdict">At 150 frames per run, throughput is irrelevant. Take the accuracy.</p>
+      </article>
+      <article>
+        <div class="tag">Revised</div>
+        <h3>Take rtmlib, leave the rest</h3>
+        <p>Sports2D wraps RTMLib neatly and computes joint and segment angles, but its pixel-to-metre step assumes motion in a plane parallel to the camera, stated as its own key limitation.</p>
+        <p class="verdict">That fails here. Use rtmlib for keypoints, write the calibration and phase logic yourself.</p>
+      </article>
+      <article>
+        <div class="tag">Revised · night footage</div>
+        <h3>The shadow is the real hazard</h3>
+        <p>Floodlights cast a hard rider-sized shadow onto the pale matting. A quick background-subtraction pass on the clip latched onto it repeatedly, inflating bounding boxes to more than double the rider's height.</p>
+        <p class="verdict">Detector on the person, never on the motion blob. Reject dark regions that lie flat on the mat plane.</p>
+      </article>
+      <article>
+        <div class="tag">Runtime</div>
+        <h3>CoreML barely matters here</h3>
+        <p>ONNX Runtime's CoreML provider needs macOS 10.15+ and prefers a Neural Engine, but it partitions the graph and falls back to CPU for unsupported ops, so a speedup isn't guaranteed.</p>
+        <p class="verdict">150 frames will run in seconds either way. Benchmark it once and stop thinking about it.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="calib">
+  <div class="wrap">
+    <div class="shead">
+      <div class="num">05</div>
+      <h2>The mat is your calibration target</h2>
+      <p>Scale is not constant in this view, so a single pixels-per-metre number is meaningless. The matting solves it for free, and the static camera means you solve it once.</p>
+    </div>
+    <div class="body">
+      <ul class="plain">
+        <li><b>Ground homography.</b> The dry-slope tiles form a dense, sharp, regular grid across the whole run, clearly resolved even in the far field. Four correspondences into <code>cv2.findHomography</code> gives an image-to-surface map for the entire mat.</li>
+        <li><b>Solve once per session.</b> The camera does not move within a clip and, if the tripod position is repeatable, does not move between them. Store the homography against the session, not the clip.</li>
+        <li><b>Metric board track.</b> Push the board contact point through <code>cv2.perspectiveTransform</code> for true position, speed and lateral drift, free of perspective.</li>
+        <li><b>Precision needs no calibration at all.</b> Ground sampling in millimetres equals 1750 divided by the rider's pixel height, given a 1.75 m stature. Log rider pixel height per frame and every error bar follows from it.</li>
+        <li><b>Vertical scale separately.</b> The ground homography says nothing about height. Recover it from the rider's stature at a known ground point.</li>
+      </ul>
+      <p>Stabilisation, which mattered a great deal when a panning camera was assumed, is now a verification step rather than a stage. Confirm the background is locked, log the residual, and move on.</p>
+    </div>
+  </div>
+</section>
+
+<section id="pipeline">
+  <div class="wrap">
+    <div class="shead">
+      <div class="num">06</div>
+      <h2>The pipeline</h2>
+      <p>Seven stages, offline, one clip at a time. Two of them are new since the footage arrived.</p>
+    </div>
+    <div class="pipe">
+      <div class="stage">
+        <div class="idx">01</div>
+        <div><h3>Ingest</h3><p>Read HEVC, apply the −90 rotation metadata explicitly rather than trusting the decoder, index frames against presentation timestamps.</p></div>
+        <div class="owns">PyAV</div>
+      </div>
+      <div class="stage key">
+        <div class="idx">02</div>
+        <div><h3>Trim to the run</h3><p>Only a sixth of the clip contains a rider. Find the window by motion energy, pad it, and discard the rest before any model runs. Everything downstream gets six times cheaper for free.</p></div>
+        <div class="owns">OpenCV</div>
+      </div>
+      <div class="stage">
+        <div class="idx">03</div>
+        <div><h3>Detect &amp; track</h3><p>Person detector rather than background subtraction, so the cast shadow is rejected by appearance. Crop with margin, upscale to model input, then pose. Log rider pixel height every frame.</p></div>
+        <div class="owns">rtmlib · ByteTrack</div>
+      </div>
+      <div class="stage key">
+        <div class="idx">04</div>
+        <div><h3>Segment phases</h3><p>Drop-in, transition, takeoff run, from board yaw rate and path curvature on the mat plane. Every metric downstream carries its phase label and a validity flag.</p></div>
+        <div class="owns">Your module</div>
+      </div>
+      <div class="stage">
+        <div class="idx">05</div>
+        <div><h3>Calibrate</h3><p>Ground homography from the tile grid, solved per session. Vertical scale from stature. Error bars from rider pixel height.</p></div>
+        <div class="owns">OpenCV</div>
+      </div>
+      <div class="stage">
+        <div class="idx">06</div>
+        <div><h3>Smooth &amp; measure</h3><p>Confidence-weighted gap filling, low-pass filter, then angles, centre of mass and board kinematics in surface coordinates. Never differentiate a raw signal.</p></div>
+        <div class="owns">SciPy</div>
+      </div>
+      <div class="stage">
+        <div class="idx">07</div>
+        <div><h3>Store &amp; present</h3><p>Long-format metric rows to Parquet, session calibration and phase boundaries to SQLite, pre-rendered overlay video, JSON for the charts.</p></div>
+        <div class="owns">Parquet · SQLite · FastAPI</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="data">
+  <div class="wrap">
+    <div class="shead">
+      <div class="num">07</div>
+      <h2>Data model and interface</h2>
+      <p>Phase and validity travel with every value, so a chart can never show a number the geometry doesn't support.</p>
+    </div>
+    <div class="body">
+<pre>metrics.parquet          # long format, one row per metric per frame
+  clip_id      str
+  frame_idx    int
+  t_sec        float
+  phase        str        # drop_in | transition | takeoff_run
+  metric       str        # "com_height", "knee_flex_l", ...
+  value        float
+  confidence   float
+  rider_px_h   float      # drives err_est
+  err_est      float      # metric units
+  valid        bool       # false where phase geometry kills it
+
+catalog.sqlite
+  sessions     (id, venue, camera_pose_hash, H_ground, v_scale)
+  clips        (id, session_id, path, fps, run_start_s, run_end_s)
+  phases       (clip_id, phase, t_start, t_end)</pre>
+
+      <h3>Interface</h3>
+      <p>A local FastAPI backend and a plain HTML front end. A <code>video</code> element for playback, uPlot or Plotly for the charts, synchronised off the video's <code>timeupdate</code> event with one shared cursor. Colour the chart background by phase so the bands are always visible behind the curves.</p>
+      <p>Draw the error band from <code>err_est</code> everywhere, and grey out any series where <code>valid</code> is false rather than hiding it. A visibly suppressed fore/aft trace in the takeoff run teaches the geometry; a missing one just looks like a bug.</p>
+      <p>Because every run has the same three phases, the natural comparison view is phase-aligned overlay: pick two clips, warp each to a common phase timeline, and plot them together. That is more useful than aligning on wall-clock time and is the feature most likely to change how someone rides.</p>
+    </div>
+  </div>
+</section>
+
+<section id="capture">
+  <div class="wrap">
+    <div class="shead">
+      <div class="num">08</div>
+      <h2>Capture notes</h2>
+      <p>The current setup is better than expected. These are refinements, not fixes.</p>
+    </div>
+    <div class="body">
+      <ul class="plain">
+        <li><b>Keep the tripod position marked.</b> A static, repeatable camera pose turns calibration into a once-per-season job and makes runs comparable across sessions.</li>
+        <li><b>A second camera beside the lip</b> would restore fore/aft and board pitch for the takeoff run, the phase where they matter most and this view cannot supply them.</li>
+        <li><b>Shoot landscape if the framing allows.</b> Portrait spends a lot of pixels on trees and gravel, though at 4K there is enough to go around.</li>
+        <li><b>Watch the shadow direction.</b> If the floodlights can be arranged so the shadow falls behind rather than beside the rider, detection gets easier for free.</li>
+        <li><b>120 fps if the phone offers it at 4K.</b> Edge-change timing is the one measurement that would sharpen noticeably.</li>
+        <li><b>Start recording later.</b> Six seconds of empty mat before the drop-in is harmless but wasteful; the trim stage handles it either way.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="build">
+  <div class="wrap">
+    <div class="shead">
+      <div class="num">09</div>
+      <h2>Build order</h2>
+      <p>Get one real number you trust before building any pipeline around it.</p>
+    </div>
+    <div class="body">
+      <ul class="plain">
+        <li><b>Trim and run rtmlib on this clip.</b> Overlay the skeleton across all 150 frames and watch where it degrades. That sets the honest working range before anything else is designed.</li>
+        <li><b>Build the ground homography by hand.</b> Click four tile corners, transform the contact point, check the resulting speed is plausible for a jump approach.</li>
+        <li><b>Add phase segmentation.</b> Board yaw rate is the signal. Verify the boundaries against your own eye on this clip.</li>
+        <li><b>Add CoM height and lateral offset.</b> The first outputs that say something the eye cannot.</li>
+        <li><b>Build the phase-banded timeline UI</b> against static JSON before wiring a backend.</li>
+        <li><b>Only then</b> automate calibration, fine-tune a board detector, and add the phase-aligned comparison view.</li>
+      </ul>
+      <p>The first two steps take an afternoon and will tell you whether the single-camera version is worth finishing, or whether a second camera at the lip should come first.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <h2>Sources</h2>
+    <ol>
+      <li><a href="https://github.com/davidpagnon/Sports2D">Sports2D</a> — 2D pose and angles from a single video, and its plane-parallel limitation</li>
+      <li><a href="https://github.com/perfanalytics/pose2sim">Pose2Sim</a> — multi-camera markerless kinematics, if the lip camera happens</li>
+      <li><a href="https://onnxruntime.ai/docs/execution-providers/CoreML-ExecutionProvider.html">ONNX Runtime CoreML execution provider</a></li>
+      <li><a href="https://docs.ultralytics.com/datasets/detect/coco">COCO detection dataset</a> — class list including snowboard</li>
+      <li><a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC12971853/">Pose model comparison</a> — RTMPose, ViTPose, Sapiens, MediaPipe under varying conditions</li>
+    </ol>
+    <p class="caveat">Single-camera analysis gives 2D kinematics only. Motion along the optical axis is not recoverable, and in this camera position the rider's direction of travel rotates onto that axis as they approach the lip. Treat the numbers as consistent within a phase and comparable across clips shot from the same fixed position, rather than as absolute biomechanical measurements.</p>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var s=document.getElementById('tt'), out=document.getElementById('ttVal'),
+      oPh=document.getElementById('oPh'), oPx=document.getElementById('oPx'),
+      oMm=document.getElementById('oMm'), oErr=document.getElementById('oErr'),
+      oFa=document.getElementById('oFa'),
+      curve=document.getElementById('hcurve'), anch=document.getElementById('anchors'),
+      head=document.getElementById('head'), dot=document.getElementById('dot');
+
+  var T0=3.95, T1=6.45, X0=40, X1=505, YTOP=56, YBOT=196, HMAX=1000;
+  // measured (m) and interpolated anchors
+  var A=[[3.95,940,0],[4.05,915,0],[4.50,790,1],[5.20,425,1],[5.70,330,0],[6.30,220,1],[6.45,205,0]];
+
+  function X(t){ return X0 + (t-T0)/(T1-T0)*(X1-X0); }
+  function Y(h){ return YBOT - (h/HMAX)*(YBOT-YTOP); }
+
+  function hAt(t){
+    for(var i=0;i<A.length-1;i++){
+      if(t<=A[i+1][0]){
+        var a=A[i], b=A[i+1], f=(t-a[0])/(b[0]-a[0]);
+        var inv = (1/a[1]) + f*((1/b[1])-(1/a[1]));   // linear in 1/h ≈ linear in depth
+        return 1/inv;
+      }
+    }
+    return A[A.length-1][1];
+  }
+
+  var d='', pts='';
+  for(var t=T0;t<=T1+0.001;t+=0.05){ d += (d?' L':'M')+X(t).toFixed(1)+' '+Y(hAt(t)).toFixed(1); }
+  curve.setAttribute('d',d);
+  A.forEach(function(p){
+    if(p[2]) pts += '<circle cx="'+X(p[0]).toFixed(1)+'" cy="'+Y(p[1]).toFixed(1)+'" r="3" fill="var(--card)" stroke="var(--piste)" stroke-width="1.6"/>';
+  });
+  anch.innerHTML=pts;
+
+  function phase(t){
+    if(t<4.55) return ['Drop-in','Usable','var(--p1)'];
+    if(t<5.70) return ['Transition','Degrading','var(--p2)'];
+    return ['Takeoff run','Lost','var(--p3)'];
+  }
+
+  function render(){
+    var t=+s.value, h=hAt(t), p=phase(t);
+    var gsd = 1750/h;                 // mm per px
+    out.textContent = t.toFixed(2)+' s';
+    oPh.textContent = p[0]; oPh.style.color = p[2];
+    oPx.textContent = Math.round(h)+' px';
+    oMm.textContent = gsd.toFixed(1)+' mm/px';
+    oErr.textContent = '\u00B1'+(3*gsd/10).toFixed(1)+' cm';
+    oFa.textContent = p[1]; oFa.style.color = p[2];
+    var x=X(t);
+    head.setAttribute('x1',x); head.setAttribute('x2',x);
+    dot.setAttribute('cx',x); dot.setAttribute('cy',Y(h));
+  }
+  s.addEventListener('input',render);
+  render();
+})();
+</script>
+
+</body>
+</html>
