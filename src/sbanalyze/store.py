@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 import threading
@@ -18,12 +19,13 @@ CREATE TABLE IF NOT EXISTS session (
     id TEXT PRIMARY KEY, venue TEXT, camera_pose_note TEXT,
     focal_px REAL, stature_m REAL, chain_fraction REAL,
     left_edge_x BLOB, mat_top_y INTEGER, calib_method TEXT, residual_px REAL,
-    transition_y REAL, takeoff_y REAL, pitch_deg REAL, pitch_sd_deg REAL
+    transition_y REAL, takeoff_y REAL, pitch_deg REAL, pitch_sd_deg REAL,
+    vp_x REAL, vp_y REAL
 );
 CREATE TABLE IF NOT EXISTS run (
     id TEXT PRIMARY KEY, session_id TEXT REFERENCES session(id), recorded_at TEXT,
     pipeline_version TEXT, config_hash TEXT, status TEXT, stance TEXT, stance_width_m REAL,
-    qa_json TEXT
+    qa_json TEXT, title TEXT, sort_order REAL
 );
 CREATE TABLE IF NOT EXISTS clip (
     id TEXT PRIMARY KEY, run_id TEXT REFERENCES run(id), view TEXT, path TEXT, fps REAL,
@@ -47,6 +49,11 @@ CREATE TABLE IF NOT EXISTS phase_span (
 """
 
 
+def _f(v) -> float:
+    """SQLite stores NaN as NULL; read it back as NaN."""
+    return float("nan") if v is None else float(v)
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = root
@@ -55,6 +62,22 @@ class Store:
         self._path = root / "catalog.sqlite"
         self._local = threading.local()
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a catalog was created, keeping its data."""
+        for table, ddl in re.findall(r"CREATE TABLE IF NOT EXISTS (\w+) \((.*?)\);", SCHEMA,
+                                     re.DOTALL):
+            have = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            ddl = re.sub(r"(PRIMARY KEY|UNIQUE|FOREIGN KEY)\s*\([^)]*\)", "", ddl)
+            for part in ddl.split(","):
+                words = part.split()
+                if not words or words[0].upper() in ("PRIMARY", "FOREIGN", "UNIQUE"):
+                    continue
+                col, typ = words[0], words[1] if len(words) > 1 else ""
+                if col not in have:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        self.db.commit()
 
     @property
     def db(self) -> sqlite3.Connection:
@@ -119,15 +142,17 @@ class Store:
         return Calibration(
             focal_px=r["focal_px"], stature_m=r["stature_m"], chain_fraction=r["chain_fraction"],
             left_edge_x=np.frombuffer(r["left_edge_x"], np.float32).copy(),
-            mat_top_y=r["mat_top_y"], method=r["calib_method"], residual_px=r["residual_px"],
-            transition_y=r["transition_y"], takeoff_y=r["takeoff_y"],
-            pitch_deg=r["pitch_deg"], pitch_sd_deg=r["pitch_sd_deg"],
+            mat_top_y=r["mat_top_y"], method=r["calib_method"], residual_px=_f(r["residual_px"]),
+            transition_y=_f(r["transition_y"]), takeoff_y=_f(r["takeoff_y"]),
+            pitch_deg=_f(r["pitch_deg"]), pitch_sd_deg=_f(r["pitch_sd_deg"]),
+            vp_x=r["vp_x"] if r["vp_x"] is not None else float("nan"),
+            vp_y=r["vp_y"] if r["vp_y"] is not None else float("nan"),
         )
 
     def put_session(self, session_id: str, venue: str, cal: Calibration | None,
                     note: str = "") -> None:
         self.db.execute(
-            "INSERT OR REPLACE INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (session_id, venue, note,
              cal.focal_px if cal else None, cal.stature_m if cal else None,
              cal.chain_fraction if cal else None,
@@ -135,15 +160,24 @@ class Store:
              cal.mat_top_y if cal else None, cal.method if cal else None,
              cal.residual_px if cal else None, cal.transition_y if cal else None,
              cal.takeoff_y if cal else None, cal.pitch_deg if cal else None,
-             cal.pitch_sd_deg if cal else None))
+             cal.pitch_sd_deg if cal else None, cal.vp_x if cal else None,
+             cal.vp_y if cal else None))
         self.db.commit()
 
     # ---- runs and clips --------------------------------------------------------------------
     def put_run(self, run_id: str, session_id: str, meta: ClipMeta, version: str,
                 cfg_hash: str, status: str, stance: str = "", stance_w: float = 0.0,
                 qa: dict | None = None) -> None:
+        # upsert: re-analysing a run keeps the user's title and library position
         self.db.execute(
-            "INSERT OR REPLACE INTO run VALUES (?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO run (id, session_id, recorded_at, pipeline_version, config_hash,
+                                status, stance, stance_width_m, qa_json)
+               VALUES (?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id,
+                 recorded_at=excluded.recorded_at, pipeline_version=excluded.pipeline_version,
+                 config_hash=excluded.config_hash, status=excluded.status,
+                 stance=excluded.stance, stance_width_m=excluded.stance_width_m,
+                 qa_json=excluded.qa_json""",
             (run_id, session_id, meta.recorded_at.isoformat(), version, cfg_hash, status,
              stance, stance_w, json.dumps(qa or {})))
         self.db.commit()
@@ -206,10 +240,11 @@ class Store:
     def list_clips(self) -> list[dict]:
         q = """SELECT c.id AS clip_id, c.run_id, c.view, c.path, c.fps, c.frame_width,
                       c.frame_height, r.session_id, r.recorded_at, r.status, r.stance,
-                      w.start_frame, w.end_frame, w.method AS window_method, r.qa_json
+                      w.start_frame, w.end_frame, w.method AS window_method, r.qa_json,
+                      r.title, r.sort_order
                FROM clip c JOIN run r ON r.id = c.run_id
                LEFT JOIN run_window w ON w.clip_id = c.id
-               ORDER BY r.recorded_at"""
+               ORDER BY r.sort_order IS NULL, r.sort_order, r.recorded_at"""
         out = []
         for row in self.db.execute(q):
             d = dict(row)
@@ -227,9 +262,28 @@ class Store:
             if d["start_frame"] is not None and d["end_frame"] is not None:
                 d["thumb_frame"] = d["start_frame"] + int(0.55 * (d["end_frame"] - d["start_frame"]))
             d["file_name"] = Path(d["path"]).name
+            # changes every time the run is (re)processed: lets the browser tell new frame images
+            # from cached old ones, since they are served under the same names
+            ov = self.overlay_path(d["clip_id"])
+            d["version"] = int(ov.stat().st_mtime) if ov.exists() else 0
             d["uploaded_copy"] = self._is_upload(Path(d["path"]))
             out.append(d)
         return out
+
+    def set_title(self, clip_id: str, title: str | None) -> None:
+        self.db.execute("UPDATE run SET title=? WHERE id=(SELECT run_id FROM clip WHERE id=?)",
+                        ((title or "").strip() or None, clip_id))
+        self.db.commit()
+
+    def set_order(self, clip_ids: list[str]) -> None:
+        """Library order: the given clips first, in this order; any others keep their order
+        after them."""
+        known = [c["clip_id"] for c in self.list_clips()]
+        order = [c for c in clip_ids if c in known] + [c for c in known if c not in clip_ids]
+        self.db.executemany(
+            "UPDATE run SET sort_order=? WHERE id=(SELECT run_id FROM clip WHERE id=?)",
+            [(float(k), cid) for k, cid in enumerate(order)])
+        self.db.commit()
 
     def _is_upload(self, path: Path) -> bool:
         try:
@@ -277,7 +331,8 @@ class Store:
             "SELECT phase, t_start, t_end, source FROM phase_span WHERE run_id=? "
             "ORDER BY t_start", (d["run_id"],))]
         ses = self.db.execute("SELECT venue, calib_method, residual_px, focal_px, stature_m, "
-                              "transition_y, takeoff_y, mat_top_y, pitch_deg, pitch_sd_deg "
+                              "transition_y, takeoff_y, mat_top_y, pitch_deg, pitch_sd_deg, "
+                              "vp_x, vp_y "
                               "FROM session WHERE id=?", (d["session_id"],)).fetchone()
         d["session"] = dict(ses) if ses else None
         return d

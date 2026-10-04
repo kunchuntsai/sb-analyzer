@@ -11,6 +11,7 @@ Two frame caches are written:
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import cv2
@@ -67,10 +68,10 @@ def follow_rects(boxes: np.ndarray, t: np.ndarray, aspect: float, frame_wh: tupl
     fw, fh = frame_wh
     h = np.minimum(np.minimum(h, fh), fw / aspect)  # never wider or taller than the picture
     w = h * aspect
-    # keep the crop inside the picture where it fits (no black borders near the camera);
-    # the rider is then off-centre only where the picture itself ends
-    x0 = np.clip(cx - w / 2, 0, np.maximum(0, fw - w))
-    y0 = np.clip(cy - h / 2, 0, np.maximum(0, fh - h))
+    # always centred on the rider; where the crop runs past the picture's edge (the rider is
+    # at the border, e.g. dropping in under the camera) it is padded with dark background
+    x0 = cx - w / 2
+    y0 = cy - h / 2
     return np.stack([x0, y0, w, h], axis=1)
 
 
@@ -130,6 +131,7 @@ def write_overlay(path: Path, sig, poses: list[PoseFrame | None], cal: Calibrati
     edge = [[round(float(cal.left_edge_x[y]) * scale, 1), round(y * scale, 1)]
             for y in rows if np.isfinite(cal.left_edge_x[y])]
     doc = {
+        "version": int(time.time()),
         "width": size[0], "height": size[1], "scale": scale,
         "edges": [list(e) for e in HALPE26_EDGES],
         "mat_edge": edge,

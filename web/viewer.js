@@ -49,8 +49,9 @@ export class Viewer {
   async load(clipId, frames, overlay, onProgress) {
     this.overlay = overlay;
     const hasFollow = !!overlay.follow;
-    const urls = frames.map((f) => `/clips/${clipId}/frames/${f}`);
-    const furls = hasFollow ? frames.map((f) => `/clips/${clipId}/follow/${f}`) : [];
+    const v = overlay.version ?? Date.now(); // new version after every re-analysis
+    const urls = frames.map((f) => `/clips/${clipId}/frames/${f}?v=${v}`);
+    const furls = hasFollow ? frames.map((f) => `/clips/${clipId}/follow/${f}?v=${v}`) : [];
     const total = urls.length + furls.length;
     let base = 0;
     const prog = (n) => onProgress?.(base + n, total);

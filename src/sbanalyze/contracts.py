@@ -106,6 +106,8 @@ class Calibration:
     takeoff_y: float = float("nan")  # image row where the kicker face starts
     pitch_deg: float = float("nan")  # camera pitch below horizontal, from the vertical VP
     pitch_sd_deg: float = float("nan")
+    vp_x: float = float("nan")  # vertical vanishing point (full-res px): the image of gravity
+    vp_y: float = float("nan")
 
 
 @dataclass(frozen=True)

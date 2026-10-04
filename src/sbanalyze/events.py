@@ -53,7 +53,7 @@ RULES: tuple[Rule, ...] = (
     Rule("trunk_lean", 90.0, 8.0, "Trunk", "Trunk jerks right", "Trunk jerks left",
          "deg", 1, "°", max_delta=60.0, use_degraded=False),
     Rule("speed_along", 3.5, 0.5, "Speed", "Sudden acceleration", "Sudden deceleration",
-         "m/s", 1, " m/s", max_delta=4.0, use_degraded=False,
+         "m/s", 3.6, " km/h", max_delta=4.0, use_degraded=False,
          max_rate=9.81),  # a board on a slope cannot out-accelerate free fall
 )
 
@@ -213,8 +213,6 @@ def detect(frames: np.ndarray, t: np.ndarray, phases: list[str],
             mag = abs(delta) * rule.scale
             text = (f"{rule.up if delta > 0 else rule.down} "
                     f"{mag:.0f}{rule.unit_disp} in {dur:.2f} s")
-            if rule.metric == "speed_along":
-                text += f" ({delta / dur:+.1f} m/s²)"
             events.append(Event(
                 metric=rule.metric, kind=rule.kind, severity="strong" if strong else "moderate",
                 phase=phases[k], t_start=t0, t_end=t1, t_peak=float(t[k]),
@@ -223,3 +221,77 @@ def detect(frames: np.ndarray, t: np.ndarray, phases: list[str],
             ))
     events.sort(key=lambda ev: ev.t_peak)
     return events
+
+
+def check_edge_transitions(events: list[Event], samples, frames: np.ndarray, t: np.ndarray,
+                           board_width_m: float, side_m: float = 0.05) -> list[dict]:
+    """For each edge change: how far the board's line moved across the slope *during the
+    transition itself*.
+
+    The transition runs from the last moment the rider is still clearly on the old edge (CoM
+    more than `side_m` to that side of the board) to the first moment clearly on the new edge.
+    Ideal technique rolls the board from edge to edge in place, so the new line lies within one
+    board width of the old one. The event is annotated, and becomes "strong" when the shift
+    exceeds one board width by more than its uncertainty.
+    """
+    pos = {int(f): i for i, f in enumerate(frames)}
+    n = len(frames)
+    line, err, th = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    for s in samples:
+        if s.validity is Validity.INVALID:
+            continue
+        i = pos[s.frame_idx]
+        if s.metric == "line_offset":
+            line[i], err[i] = s.value, s.err_est
+        elif s.metric == "com_toe_heel":
+            th[i] = s.value
+    out = []
+    for ev in events:
+        if ev.metric != "edge_change":
+            continue
+        k0, k1 = pos.get(ev.frame_start), pos.get(ev.frame_end)
+        if k0 is None or k1 is None:
+            continue
+        to_toe = "heel → toe" in ev.text
+        old = -1 if to_toe else 1  # side of the old edge (+ toe / - heel)
+        # tighten to the transition: last frame still on the old side .. first on the new side
+        seg = np.arange(k0, k1 + 1)
+        on_old = seg[np.isfinite(th[seg]) & (old * th[seg] > side_m)]
+        on_new = seg[np.isfinite(th[seg]) & (-old * th[seg] > side_m)]
+        a = int(on_old[-1]) if on_old.size else k0
+        b_candidates = on_new[on_new > a]
+        b = int(b_candidates[0]) if b_candidates.size else k1
+        # line at each end: median of the nearest 3 valid frames, to steady single-frame noise
+        def at(i: int, direction: int) -> tuple[float, float]:
+            idx = [j for j in range(i, i + 6 * direction, direction) if 0 <= j < n
+                   and np.isfinite(line[j])][:3]
+            if not idx:
+                return float("nan"), float("nan")
+            return float(np.median(line[idx])), float(np.median(err[idx]))
+        l0, e0 = at(a, -1)
+        l1, e1 = at(b, +1)
+        if not (np.isfinite(l0) and np.isfinite(l1)):
+            ev.text += "; line shift: not measurable here"
+            continue
+        shift = l1 - l0
+        e_shift = float(np.hypot(e0, e1))
+        widths = abs(shift) / board_width_m
+        over = abs(shift) - e_shift > board_width_m
+        ok = abs(shift) + e_shift <= board_width_m
+        verdict = ("within one board width" if ok else
+                   "more than one board width: the board slid sideways" if over else
+                   "about one board width (borderline)")
+        dur = float(t[b] - t[a])
+        ev.text += (f"; during the {dur:.2f} s transition the line shifts "
+                    f"{abs(shift) * 100:.0f}±{e_shift * 100:.0f} cm = {widths:.1f} board widths,"
+                    f" {verdict}")
+        if over:
+            ev.severity = "strong"
+        out.append({
+            "t_start": float(t[a]), "t_end": float(t[b]), "frame_start": int(frames[a]),
+            "frame_end": int(frames[b]), "duration_s": dur,
+            "direction": "heel → toe" if to_toe else "toe → heel", "shift_m": shift,
+            "err_m": e_shift, "board_widths": widths,
+            "verdict": "ok" if ok else "over" if over else "borderline",
+        })
+    return out

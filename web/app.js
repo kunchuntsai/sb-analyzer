@@ -1,4 +1,4 @@
-import { state, set, subscribe } from "./store.js";
+import { state, set, subscribe, toKmh } from "./store.js";
 import { Viewer } from "./viewer.js";
 import { ChartStack, METRIC_META, PHASE_COLORS, PHASE_LABEL } from "./charts.js";
 import { CompareView } from "./compare.js";
@@ -21,8 +21,11 @@ async function loadRun(clipId) {
     fetch(`/clips/${clipId}/overlay`).then((r) => r.json()),
     fetch(`/clips/${clipId}/events`).then((r) => r.json()),
   ]);
+  toKmh(metrics.series, metrics.units);
   return { detail, metrics, overlay, events };
 }
+
+
 
 const fmt = (v, digits = 2) => (v == null || !Number.isFinite(v) ? "–" : v.toFixed(digits));
 const idxOfFrame = (f) => Math.max(0, run.metrics.frames.indexOf(f));
@@ -65,22 +68,87 @@ function stanceChip(st, raw, chip) {
   return chip("stance", `${value} ${st.source === "config" ? "(set)" : pct(st.confidence)}`, warn ? "warn" : "", title);
 }
 
+// Headline numbers, computed from the samples that count (valid or degraded, never invalid).
+// Each tile jumps the video to the frame where its value occurs.
+function keyMetricTiles() {
+  const m = run.metrics;
+  const usable = (s, i) => s.value[i] != null && s.validity[i] !== "invalid";
+  const extreme = (key, pick = (v) => v) => {
+    const s = m.series[key];
+    if (!s) return null;
+    let best = null;
+    s.value.forEach((v, i) => {
+      if (!usable(s, i)) return;
+      if (best === null || pick(v) > pick(s.value[best])) best = i;
+    });
+    return best === null ? null : { i: best, v: s.value[best], err: s.err[best] };
+  };
+  const card = (label, x, value, sub) => x
+    ? `<div class="tile key" data-frame="${x.i}" title="Click to go to this moment (${fmt(m.t[x.i] - m.t[0], 2)} s)">
+         <span>${label}</span><b>${value}</b><small>${sub}</small></div>`
+    : `<div class="tile key"><span>${label}</span><b>–</b><small>not measured</small></div>`;
+
+  const air = extreme("air_height");
+  const spd = extreme("speed_along");
+  const comH = extreme("com_height");
+  // stance-aware: + toe edge / - heel edge
+  const comL = extreme("com_toe_heel", Math.abs);
+  const toeMax = extreme("com_toe_heel");
+  const heelMax = extreme("com_toe_heel", (v) => -v);
+  // line width: how far the board's track spreads across the slope while on the mat
+  let line = null;
+  const ls = m.series.line_offset;
+  if (ls) {
+    let lo = null, hi = null;
+    ls.value.forEach((v, i) => {
+      if (!usable(ls, i)) return;
+      if (lo === null || v < ls.value[lo]) lo = i;
+      if (hi === null || v > ls.value[hi]) hi = i;
+    });
+    if (lo !== null) line = { i: hi, v: ls.value[hi] - ls.value[lo], lo, hi };
+  }
+  const bw = run.detail.qa?.board_width_m ?? 0.25;
+  return [
+    card("Air height (max)", air, air ? `${fmt(air.v, 2)} m` : "", air ? `lip tip → summit ±${fmt(air.err, 2)}` : ""),
+    card("Speed (max)", spd, spd ? `${fmt(spd.v, 0)} km/h` : "", spd ? "down the slope" : ""),
+    card("CoM height (max)", comH, comH ? `${fmt(comH.v, 2)} m` : "", "above the board"),
+    card("CoM lateral (max)", comL,
+      comL ? `${comL.v >= 0 ? "+" : "−"}${fmt(Math.abs(comL.v) * 100, 0)} cm` : "",
+      comL ? `toe +${fmt(Math.max(0, toeMax.v) * 100, 0)} / heel −${fmt(Math.max(0, -heelMax.v) * 100, 0)} cm` : ""),
+    card("Line (width)", line, line ? `${fmt(line.v, 2)} m` : "",
+      line ? `${fmt(line.v / bw, 1)} board widths across` : ""),
+  ];
+}
+
+// Edge transitions: an ideal edge-to-edge roll keeps the new line within one board width of
+// the old one. One tile per transition: shift in board widths, green / amber / red.
+function edgeTransitionTiles(qa) {
+  const tr = qa.edge_transitions || [];
+  const bw = qa.board_width_m ?? 0.25;
+  return tr.map((x, k) => {
+    const cls = { ok: "good", borderline: "warn", over: "bad" }[x.verdict];
+    const mark = { ok: "✓", borderline: "≈", over: "✗" }[x.verdict];
+    return `<div class="tile ${cls}" title="Line shift across the slope during the ${x.direction} edge change: ${(Math.abs(x.shift_m) * 100).toFixed(0)} ± ${(x.err_m * 100).toFixed(0)} cm; one board width = ${(bw * 100).toFixed(0)} cm">
+      <span>Edge change ${k + 1} (${x.direction})</span><b>${mark} ${x.board_widths.toFixed(1)} board widths</b></div>`;
+  });
+}
+
 // ---- analysis result: jump + sudden movements --------------------------------------------------
 function renderResult() {
   const qa = run.detail.qa || {};
   const j = qa.jump;
   const tile = (label, value, sub = "", cls = "") =>
     `<div class="tile ${cls}"><span>${label}</span><b>${value}</b><small>${sub}</small></div>`;
+  $("#keyMetrics").innerHTML = keyMetricTiles().join("");
+  $("#keyMetrics").querySelectorAll(".tile[data-frame]").forEach((el) =>
+    el.addEventListener("click", () => set({ frame: +el.dataset.frame, playing: false })));
   $("#jump").innerHTML = [
     tile("Air time", j ? `${fmt(j.air_time_s, 2)} s` : "–",
       j ? (j.landing_seen ? "takeoff → touchdown" : "touchdown not seen") : "no flight tracked",
       j && !j.landing_seen ? "warn" : ""),
-    tile("Jump height", j ? `${fmt(j.apex_height_m, 2)} m` : "–",
-      j ? `board above lip · ±${fmt(j.apex_err_m, 2)} m` : ""),
     tile("Time to apex", j ? `${fmt(j.t_apex - j.t_takeoff, 2)} s` : "–", ""),
-    tile("Takeoff speed", j ? `${fmt(j.takeoff_speed_mps, 1)} m/s` : "–",
-      j ? `${fmt(j.takeoff_speed_mps * 3.6, 0)} km/h` : ""),
-    tile("Peak in-run", `${fmt(qa.peak_speed_mps, 1)} m/s`, `${fmt(qa.peak_speed_mps * 3.6, 0)} km/h`),
+    tile("Takeoff speed", j ? `${fmt(j.takeoff_speed_mps * 3.6, 0)} km/h` : "–", ""),
+    ...edgeTransitionTiles(qa),
   ].join("");
 
   const ev = run.events;
@@ -395,7 +463,7 @@ let allClips = [];
 function renderCurrentLabel() {
   const c = allClips.find((x) => x.clip_id === state.clipId);
   $("#currentLabel").textContent = c
-    ? `${c.recorded_at.replace("T", " ").slice(0, 16)} · ${c.file_name}` : "Videos";
+    ? (c.title || `${c.recorded_at.replace("T", " ").slice(0, 16)} · ${c.file_name}`) : "Videos";
 }
 
 async function refreshClips() {
@@ -411,7 +479,7 @@ function showEmpty() {
   $("#loading").hidden = false;
   $("#loading").innerHTML = `No videos yet. <button class="primary" id="firstImport">＋ Add videos</button>`;
   $("#firstImport").addEventListener("click", () => importer.open());
-  $("#charts").innerHTML = ""; $("#events").innerHTML = ""; $("#jump").innerHTML = "";
+  $("#charts").innerHTML = ""; $("#events").innerHTML = ""; $("#jump").innerHTML = ""; $("#keyMetrics").innerHTML = "";
   $("#qa").innerHTML = ""; $("#eventSummary").textContent = "";
   renderCurrentLabel();
 }

@@ -73,6 +73,7 @@
       <div id="qa" class="qa"></div>
       <div class="card result">
         <h2>Analysis result</h2>
+        <div id="keyMetrics" class="key-metrics"></div>
         <div id="jump" class="jump"></div>
         <div id="eventSummary" class="event-summary"></div>
         <ol id="events" class="events"></ol>
@@ -99,9 +100,17 @@
       <button id="libraryClose" class="x" aria-label="Close">✕</button>
     </div>
     <button id="libraryAdd" class="primary wide">＋ Add videos</button>
-    <input id="librarySearch" type="search" placeholder="Filter by date or file name" aria-label="Filter videos">
+    <div class="lib-tools">
+      <input id="librarySearch" type="search" placeholder="Filter by title, date or file name" aria-label="Filter videos">
+      <select id="librarySort" aria-label="Sort the list" title="Sort the whole list once; then drag to fine-tune">
+        <option value="">Sort…</option>
+        <option value="date-new">Newest first</option>
+        <option value="date-old">Oldest first</option>
+        <option value="name">By name</option>
+      </select>
+    </div>
     <div id="libraryList" class="lib-list"></div>
-    <div class="lib-drop">Drop videos or folders anywhere on this panel to add them</div>
+    <div class="lib-drop">Drag ⠿ to reorder · ✎ rename · drop videos or folders here to add them</div>
     <div id="libraryToast" class="toast" hidden></div>
   </aside>
 

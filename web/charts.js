@@ -122,7 +122,7 @@ export function buildSeries(metrics, series, units) {
 // Invalid stretches (e.g. pose errors mid-air) are still drawn in grey, but clipped, so they
 // cannot flatten the part of the run that matters.
 const CHART_H = 138;
-const MIN_SPAN = { m: 0.1, "m/s": 1, deg: 10 };
+const MIN_SPAN = { m: 0.1, "m/s": 1, "km/h": 4, deg: 10 };
 
 function yRange(metricsInGroup, metrics) {
   let lo = Infinity, hi = -Infinity, unit = "m";

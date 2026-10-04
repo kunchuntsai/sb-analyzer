@@ -178,6 +178,27 @@ def list_clips():
     return store.list_clips()
 
 
+class ClipPatch(BaseModel):
+    title: str | None = None
+
+
+@app.patch("/clips/{clip_id}")
+def rename_clip(clip_id: str, body: ClipPatch):
+    _detail_or_404(clip_id)
+    store.set_title(clip_id, body.title)
+    return {"clip_id": clip_id, "title": (body.title or "").strip() or None}
+
+
+class OrderIn(BaseModel):
+    clip_ids: list[str]
+
+
+@app.put("/library/order")
+def reorder_library(body: OrderIn):
+    store.set_order(body.clip_ids)
+    return [c["clip_id"] for c in store.list_clips()]
+
+
 @app.delete("/clips/{clip_id}")
 def delete_clip(clip_id: str):
     d = _detail_or_404(clip_id)
@@ -234,7 +255,7 @@ def get_overlay(clip_id: str):
     p = store.overlay_path(clip_id)
     if not p.exists():
         raise HTTPException(404)
-    return FileResponse(p, media_type="application/json")
+    return FileResponse(p, media_type="application/json", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/clips/{clip_id}/frames/{n}")

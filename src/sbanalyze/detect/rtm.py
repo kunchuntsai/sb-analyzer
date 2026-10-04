@@ -8,6 +8,7 @@ the full-resolution frame, so the far rider keeps every available pixel.
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 from ..contracts import PoseFrame
@@ -79,15 +80,37 @@ class RtmBackend:
               mat_small: np.ndarray | None = None, scale: float = 1.0) -> None:
         self.box, self.vel, self.lost, self.roi = None, np.zeros(4), 0, roi_mask
         self.mat_small, self.s = mat_small, scale
-        self.history, self.airborne, self.motion = [], False, None
+        self.history, self.airborne, self.motion, self.blob = [], False, None, None
+        self.track_start: int | None = None
+        self.retract: tuple[int, int] | None = None  # frames of a track that was not the rider
 
     def set_roi(self, roi_mask: np.ndarray | None) -> None:
         self.roi = roi_mask
         self.airborne = True  # only switched once the rider has left the lip
 
     def observe(self, motion_small: np.ndarray | None) -> None:
-        """This frame's foreground (moving) mask at analysis resolution."""
+        """This frame's foreground (moving) mask at analysis resolution. Also finds the largest
+        moving blob: a rider coming down the slope is by far the biggest mover."""
         self.motion = motion_small
+        self.blob = None
+        if motion_small is None:
+            return
+        m = cv2.morphologyEx(motion_small, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(m)
+        if n > 1:
+            k = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+            if stats[k, cv2.CC_STAT_AREA] >= 150:  # ignore specks and fidgeting
+                self.blob = labels == k
+
+    def _blob_share(self, box: np.ndarray) -> float:
+        """Share of the largest moving blob that falls inside this box."""
+        if self.blob is None:
+            return 0.0
+        h, w = self.blob.shape
+        x0, y0, x1, y1 = (np.array(box) * self.s).astype(int)
+        x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+        total = self.blob.sum()
+        return float(self.blob[y0:y1, x0:x1].sum() / total) if total and x1 > x0 and y1 > y0 else 0.0
 
     def _motion_frac(self, box: np.ndarray) -> float:
         if self.motion is None:
@@ -109,7 +132,8 @@ class RtmBackend:
         return bool(self.mat_small[y, x])
 
     def _is_rider(self, box: np.ndarray) -> bool:
-        return self._on_mat(box) and self._motion_frac(box) >= 0.08
+        # on the mat, and carrying a real part of the biggest moving thing in the picture
+        return self._on_mat(box) and self._blob_share(box) >= 0.25
 
     def _on_roi(self, box: np.ndarray) -> bool:
         if self.roi is None:
@@ -147,9 +171,8 @@ class RtmBackend:
             boxes = np.array([b for b in boxes if self._is_rider(b)]).reshape(-1, 4)
             if not len(boxes):
                 return None
-            motion = np.array([self._motion_frac(b) for b in boxes])
-            areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-            return boxes[int(np.argmax(areas * motion))]
+            share = np.array([self._blob_share(b) for b in boxes])
+            return boxes[int(np.argmax(share))]
         ious = np.array([_iou(b, pred) for b in boxes])
         if ious.max() > 0.05:
             return boxes[int(np.argmax(ious))]
@@ -168,8 +191,9 @@ class RtmBackend:
         self.history = [(ti, ci) for ti, ci in self.history if t - ti <= window_s]
         if t - self.history[0][0] < 0.9 * window_s:
             return False
+        # a rider on the slope always travels; fidgeting in place does not count as moving
         moved = max(np.linalg.norm(ci - c) for _, ci in self.history)
-        return moved < 0.25 * (box[3] - box[1]) and self._motion_frac(box) < 0.03
+        return moved < 0.35 * (box[3] - box[1])
 
     def infer_frame(self, frame_idx: int, t_sec: float, image: np.ndarray) -> PoseFrame | None:
         pred = None if self.box is None else self.box + self.vel
@@ -181,16 +205,20 @@ class RtmBackend:
         if box is None:
             self.lost += 1
             if self.lost > self.max_lost:
-                self.box, self.vel = None, np.zeros(4)
+                self.box, self.vel, self.track_start = None, np.zeros(4), None
             return None
         if self.box is not None:
             self.vel = 0.5 * self.vel + 0.5 * (box - self.box)
         self.box, self.lost = box, 0
         self.t = t_sec
+        if self.track_start is None:
+            self.track_start = frame_idx
         if self._stationary(box, t_sec):
             # a person who has not moved for a second while the rider would be moving is not
-            # the rider: let go and re-acquire from the moving people on the mat
-            self.box, self.vel, self.history = None, np.zeros(4), []
+            # the rider: let go, re-acquire from the moving people on the mat, and tell the
+            # caller to discard everything this track produced
+            self.retract = (self.track_start, frame_idx)
+            self.box, self.vel, self.history, self.track_start = None, np.zeros(4), [], None
             return None
 
         kps, scores = self.pose(image, bboxes=[box.tolist()])

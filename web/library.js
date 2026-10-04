@@ -1,6 +1,8 @@
 // Video library: a slide-out list of every run, with thumbnails and key numbers. Click a card to
 // open it. Add videos with the button or by dropping files/folders onto the panel. Remove or
 // re-analyse a run from its card. Videos being processed appear at the top with progress.
+// Editing: drag a card by its handle (or Alt+Up/Down) to reorder, the pencil to rename, and the
+// sort menu to put the whole list in date or name order. Order and titles are saved.
 const $ = (s, root = document) => root.querySelector(s);
 const fmt = (v, d = 2) => (v == null || !Number.isFinite(v) ? "–" : v.toFixed(d));
 
@@ -14,6 +16,8 @@ export class Library {
     this.panel = $("#library");
     this.jobs = [];
     this.confirming = null; // clip_id awaiting "Remove?" confirmation
+    this.renaming = null; // clip_id whose title is being edited
+    this.dragId = null;
     this.filter = "";
     this.poll = null;
     this._wire();
@@ -47,14 +51,15 @@ export class Library {
 
   label(c) {
     const when = (c.recorded_at || "").replace("T", " ").slice(0, 16);
-    return { when, name: c.file_name || c.clip_id };
+    return { when, name: c.file_name || c.clip_id, title: c.title || when };
   }
 
   render() {
     const clips = this.getClips();
     const current = this.getCurrent();
     const q = this.filter.toLowerCase();
-    const shown = clips.filter((c) => !q || `${c.recorded_at} ${c.file_name}`.toLowerCase().includes(q));
+    const shown = clips.filter((c) => !q || `${c.recorded_at} ${c.file_name} ${c.title ?? ""}`.toLowerCase().includes(q));
+    const canDrag = !q; // reordering a filtered list would be ambiguous
     const active = this.jobs.filter((j) => j.status === "queued" || j.status === "running");
     const failed = this.jobs.filter((j) => j.status === "failed" && !this.dismissed?.has(j.id));
     $("#libraryCount").textContent = `${clips.filter((c) => c.status === "ok").length} video${clips.length === 1 ? "" : "s"}`;
@@ -71,19 +76,23 @@ export class Library {
       </div>`).join("");
 
     const cards = shown.map((c) => {
-      const { when, name } = this.label(c);
+      const { when, name, title } = this.label(c);
+      const renaming = this.renaming === c.clip_id;
       const s = c.summary || {};
       const ok = c.status === "ok";
       const confirming = this.confirming === c.clip_id;
       const thumb = ok && c.thumb_frame != null
-        ? `<img loading="lazy" src="/clips/${c.clip_id}/follow/${c.thumb_frame}" alt="">`
+        ? `<img loading="lazy" src="/clips/${c.clip_id}/follow/${c.thumb_frame}?v=${c.version ?? 0}" alt="">`
         : `<div class="thumb placeholder">${ok ? "🎞" : "⚠"}</div>`;
       return `
       <div class="lib-card ${c.clip_id === current ? "current" : ""} ${ok ? "" : "bad"}" data-clip="${c.clip_id}" tabindex="0">
+        ${canDrag ? `<span class="handle" draggable="true" title="Drag to reorder (or Alt+↑/↓)">⠿</span>` : `<span class="handle off" title="Clear the filter to reorder">⠿</span>`}
         <div class="thumb">${thumb}</div>
         <div class="meta">
-          <b>${when}</b>
-          <span class="muted fname" title="${c.path}">${name}${c.uploaded_copy ? "" : ' <span class="tag" title="Processed in place from your folder">linked</span>'}</span>
+          ${renaming
+            ? `<input class="rename" value="${(c.title ?? "").replaceAll('"', "&quot;")}" placeholder="${when}" aria-label="Title">`
+            : `<b title="${title}">${title}</b>`}
+          <span class="muted fname" title="${c.path}">${c.title ? `${when} · ` : ""}${name}${c.uploaded_copy ? "" : ' <span class="tag" title="Processed in place from your folder">linked</span>'}</span>
           ${ok ? `<span class="stats">
               <span title="Air time">✈ ${fmt(s.air_time_s)} s</span>
               <span title="Jump height (board above lip)">↥ ${fmt(s.jump_height_m)} m</span>
@@ -95,6 +104,7 @@ export class Library {
             <span class="ask">Remove?</span>
             <button class="yes" data-act="remove-yes" title="Remove this run">Yes</button>
             <button data-act="remove-no">No</button>` : `
+            <button data-act="rename" title="Rename">✎</button>
             <button data-act="reprocess" title="Analyse again">↻</button>
             <button data-act="remove" title="Remove from the library">🗑</button>`}
         </div>
@@ -106,13 +116,59 @@ export class Library {
 
     this.panel.querySelectorAll(".lib-card[data-clip]").forEach((el) => {
       const id = el.dataset.clip;
+      // rename field: Enter saves, Esc cancels, leaving the field saves
+      const input = el.querySelector("input.rename");
+      if (input) {
+        input.focus(); input.select();
+        input.addEventListener("click", (e) => e.stopPropagation());
+        input.addEventListener("keydown", (e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") this.saveTitle(id, input.value);
+          if (e.key === "Escape") { this.renaming = null; this.render(); }
+        });
+        input.addEventListener("blur", () => this.renaming === id && this.saveTitle(id, input.value));
+      }
+      // drag to reorder
+      const handle = el.querySelector(".handle[draggable]");
+      handle?.addEventListener("dragstart", (e) => {
+        this.dragId = id;
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/x-sb-clip", id);
+        e.dataTransfer.setDragImage(el, 20, 20);
+        requestAnimationFrame(() => el.classList.add("dragging"));
+      });
+      handle?.addEventListener("dragend", () => { this.dragId = null; this.render(); });
+      el.addEventListener("dragover", (e) => {
+        if (!this.dragId || this.dragId === id) return;
+        e.preventDefault(); e.stopPropagation();
+        const r = el.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        el.classList.toggle("drop-before", !after);
+        el.classList.toggle("drop-after", after);
+      });
+      el.addEventListener("dragleave", () => el.classList.remove("drop-before", "drop-after"));
+      el.addEventListener("drop", (e) => {
+        if (!this.dragId) return;
+        e.preventDefault(); e.stopPropagation();
+        const after = el.classList.contains("drop-after");
+        el.classList.remove("drop-before", "drop-after");
+        this.moveTo(this.dragId, id, after);
+      });
       el.addEventListener("click", (e) => {
+        if (e.target.closest(".handle")) return;
         const act = e.target.closest("button")?.dataset.act;
         if (act) { e.stopPropagation(); this.action(act, id); return; }
         const c = this.getClips().find((x) => x.clip_id === id);
         if (c?.status === "ok") { this.onOpen(id); this.close(); }
       });
       el.addEventListener("keydown", (e) => {
+        if (e.target !== el) return;
+        if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+          e.preventDefault();
+          this.moveBy(id, e.key === "ArrowUp" ? -1 : 1);
+          return;
+        }
+        if (e.key === "F2") { this.renaming = id; this.render(); return; }
         if (e.key === "Enter") el.click();
         if (e.key === "Delete" || e.key === "Backspace") { this.confirming = id; this.render(); }
       });
@@ -123,8 +179,61 @@ export class Library {
     }));
   }
 
+  // ---- editing ----------------------------------------------------------------------------
+  order() { return this.getClips().map((c) => c.clip_id); }
+
+  async saveOrder(ids, focusId = null) {
+    await fetch("/library/order", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clip_ids: ids }),
+    });
+    await this.onChanged({});
+    this.render();
+    if (focusId) this.panel.querySelector(`.lib-card[data-clip="${focusId}"]`)?.focus();
+  }
+
+  moveTo(dragId, targetId, after) {
+    const ids = this.order().filter((x) => x !== dragId);
+    const k = ids.indexOf(targetId);
+    ids.splice(after ? k + 1 : k, 0, dragId);
+    return this.saveOrder(ids, dragId);
+  }
+
+  moveBy(id, step) {
+    const ids = this.order();
+    const k = ids.indexOf(id), j = k + step;
+    if (k < 0 || j < 0 || j >= ids.length) return;
+    [ids[k], ids[j]] = [ids[j], ids[k]];
+    return this.saveOrder(ids, id);
+  }
+
+  sortBy(key) {
+    const clips = [...this.getClips()];
+    const name = (c) => (c.title || c.file_name || "").toLowerCase();
+    const cmp = {
+      "date-new": (a, b) => (b.recorded_at || "").localeCompare(a.recorded_at || ""),
+      "date-old": (a, b) => (a.recorded_at || "").localeCompare(b.recorded_at || ""),
+      name: (a, b) => name(a).localeCompare(name(b), undefined, { numeric: true }),
+    }[key];
+    if (!cmp) return;
+    clips.sort(cmp);
+    this.toast("Sorted. Drag cards to fine-tune the order.");
+    return this.saveOrder(clips.map((c) => c.clip_id));
+  }
+
+  async saveTitle(id, value) {
+    this.renaming = null;
+    await fetch(`/clips/${id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: value }),
+    });
+    await this.onChanged({});
+    this.render();
+  }
+
   async action(act, id) {
     const c = this.getClips().find((x) => x.clip_id === id);
+    if (act === "rename") { this.renaming = id; this.confirming = null; this.render(); return; }
     if (act === "remove") { this.confirming = id; this.render(); return; }
     if (act === "remove-no") { this.confirming = null; this.render(); return; }
     if (act === "remove-yes") {
@@ -172,14 +281,19 @@ export class Library {
     $("#libraryScrim").addEventListener("click", () => this.close());
     $("#libraryAdd").addEventListener("click", () => { this.close(); this.importer.open(); });
     $("#librarySearch").addEventListener("input", (e) => { this.filter = e.target.value; this.render(); });
+    $("#librarySort").addEventListener("change", (e) => { this.sortBy(e.target.value); e.target.value = ""; });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape" && this.isOpen) this.close(); });
     // drop videos or folders straight onto the panel
     const p = this.panel;
-    p.addEventListener("dragover", (e) => { e.preventDefault(); p.classList.add("over"); });
+    p.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (!this.dragId) p.classList.add("over");
+    });
     p.addEventListener("dragleave", (e) => { if (!p.contains(e.relatedTarget)) p.classList.remove("over"); });
     p.addEventListener("drop", async (e) => {
       e.preventDefault();
       p.classList.remove("over");
+      if (this.dragId) return; // a card was dropped outside the list: nothing to import
       this.close();
       this.importer.open("upload");
       await this.importer._dropEntries(e.dataTransfer);

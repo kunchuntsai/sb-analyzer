@@ -108,8 +108,10 @@ def terrain_rows(edge_x: np.ndarray, top: int, frame_w: int, enter: float = 0.8,
 
 def estimate_pitch(bg: np.ndarray, mat: np.ndarray, focal_px: float, min_len: int = 60,
                    max_tilt_deg: float = 10.0, min_inliers: int = 6, seed: int = 0
-                   ) -> tuple[float, float, int]:
-    """(pitch_deg, bootstrap_sd_deg, n_inliers) from near-vertical background lines, or NaNs.
+                   ) -> tuple[float, float, int, float, float]:
+    """(pitch_deg, bootstrap_sd_deg, n_inliers, vp_x, vp_y) from near-vertical background
+    lines, or NaNs. (vp_x, vp_y) is the vertical vanishing point: the image of the gravity
+    direction. It gives the true vertical at every pixel, whatever the phone's roll.
 
     `bg` is the full-resolution median background (BGR) and `mat` a full-resolution mask to
     exclude: the mat's seams converge on the fall line, not on the vertical.
@@ -118,7 +120,7 @@ def estimate_pitch(bg: np.ndarray, mat: np.ndarray, focal_px: float, min_len: in
     gray = cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY)
     segs = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD).detect(gray)[0]
     if segs is None:
-        return float("nan"), float("nan"), 0
+        return float("nan"), float("nan"), 0, float("nan"), float("nan")
     lines = []
     for x1, y1, x2, y2 in segs.reshape(-1, 4):
         length = float(np.hypot(x2 - x1, y2 - y1))
@@ -128,7 +130,7 @@ def estimate_pitch(bg: np.ndarray, mat: np.ndarray, focal_px: float, min_len: in
                                                                       min(xm, w - 1)]:
             lines.append((x1, y1, x2, y2, length))
     if len(lines) < min_inliers:
-        return float("nan"), float("nan"), len(lines)
+        return float("nan"), float("nan"), len(lines), float("nan"), float("nan")
     seg = np.array(lines, np.float64)
     xm, ym = (seg[:, 0] + seg[:, 2]) / 2, (seg[:, 1] + seg[:, 3]) / 2
     tan = (seg[:, 2] - seg[:, 0]) / (seg[:, 3] - seg[:, 1])
@@ -153,22 +155,46 @@ def estimate_pitch(bg: np.ndarray, mat: np.ndarray, focal_px: float, min_len: in
         if score > best_score:
             best, best_score = inl, score
     if best is None or best.sum() < min_inliers:
-        return float("nan"), float("nan"), 0 if best is None else int(best.sum())
+        n_in = 0 if best is None else int(best.sum())
+        return float("nan"), float("nan"), n_in, float("nan"), float("nan")
     cy = h / 2
 
-    def pitch_of(idx: np.ndarray) -> float:
+    def vp_of(idx: np.ndarray) -> tuple[float, float]:
         sw = np.sqrt(wt[idx])
-        _, yv = np.linalg.lstsq(a[idx] * sw[:, None], b[idx] * sw, rcond=None)[0]
-        return float(np.degrees(np.arctan(focal_px / (yv - cy))))
+        xv, yv = np.linalg.lstsq(a[idx] * sw[:, None], b[idx] * sw, rcond=None)[0]
+        return float(xv), float(yv)
+
+    def pitch_of(idx: np.ndarray) -> float:
+        return float(np.degrees(np.arctan(focal_px / (vp_of(idx)[1] - cy))))
 
     idx = np.flatnonzero(best)
     boots = [pitch_of(rng.choice(idx, idx.size)) for _ in range(200)]
-    return pitch_of(idx), float(np.std(boots)), int(idx.size)
+    xv, yv = vp_of(idx)
+    return pitch_of(idx), float(np.std(boots)), int(idx.size), xv, yv
+
+
+def gravity_tilt(vp_x: float, vp_y: float, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Angle (rad) by which true "down" leans from the image's down at each pixel.
+
+    Gravity points at the vertical vanishing point, so at pixel p, down = (vp - p). Positive
+    means down leans toward image-right. Zero where the vanishing point is unknown.
+    """
+    if not (np.isfinite(vp_x) and np.isfinite(vp_y)):
+        return np.zeros_like(np.asarray(x, np.float64))
+    return np.arctan2(vp_x - np.asarray(x, np.float64), vp_y - np.asarray(y, np.float64))
+
+
+def to_gravity(v: np.ndarray, phi: np.ndarray) -> np.ndarray:
+    """Rotate image vectors (..., 2) so that true down becomes image down (+y)."""
+    c, s = np.cos(phi), np.sin(phi)
+    x, y = v[..., 0], v[..., 1]
+    return np.stack([x * c - y * s, x * s + y * c], axis=-1)
 
 
 def calibrate(mat_mask: np.ndarray, full_h: int, scale: float, focal_px: float,
               stature_m: float, chain_fraction: float,
-              pitch: tuple[float, float] = (float("nan"), float("nan"))) -> Calibration:
+              pitch: tuple[float, float] = (float("nan"), float("nan")),
+              vp: tuple[float, float] = (float("nan"), float("nan"))) -> Calibration:
     edge, top, residual = mat_left_edge(mat_mask, full_h, scale)
     y_tr, y_to = terrain_rows(edge, top, round(mat_mask.shape[1] / scale))
     # QA: straightness of the edge along the straight in-run (rows below the transition)
@@ -182,6 +208,7 @@ def calibrate(mat_mask: np.ndarray, full_h: int, scale: float, focal_px: float,
         focal_px=focal_px, stature_m=stature_m, chain_fraction=chain_fraction,
         left_edge_x=edge, mat_top_y=top, method="body_scale+mat_mask", residual_px=residual,
         transition_y=y_tr, takeoff_y=y_to, pitch_deg=pitch[0], pitch_sd_deg=pitch[1],
+        vp_x=vp[0], vp_y=vp[1],
     )
 
 

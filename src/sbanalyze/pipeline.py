@@ -18,10 +18,10 @@ from . import PIPELINE_VERSION
 from .air import analyze as analyze_air
 from .air import find_takeoff
 from .boardedge import clean_series, detect_tail_edge, lowpass, roll_from_segment, smooth_anchor
-from .calib import calibrate, estimate_pitch
+from .calib import calibrate, estimate_pitch, gravity_tilt, mat_left_edge
 from .config import Config, load_config
 from .contracts import K, Phase, PipelineError, PoseFrame, RunWindow, Validity, ViewRole
-from .events import detect, detect_edge_changes
+from .events import check_edge_transitions, detect, detect_edge_changes
 from .fuse import fuse
 from .ingest import iter_frames, probe
 from .metrics import compute_signals, phase_at, to_samples
@@ -81,6 +81,7 @@ def process(path: Path, cfg: Config | None = None, store: Store | None = None,
     meta = probe(Path(path), run_id="")
     run_id = f"run-{meta.clip_id}"
     meta = replace(meta, run_id=run_id)
+    auto_session = session_id is None
     session_id = session_id or session_id_for(meta.recorded_at)
     cid = meta.clip_id
 
@@ -106,14 +107,19 @@ def process(path: Path, cfg: Config | None = None, store: Store | None = None,
     del small
 
     # ---- calibration (session-scoped) ---------------------------------------------------------
+    # A session is one camera setup. Same date is the default grouping, but if the camera was
+    # moved (the mat sits elsewhere in the picture), this clip gets its own session.
+    if auto_session:
+        session_id = _match_session(store, session_id, bg, meta, scale)
     cal = store.get_calibration(session_id)
     if cal is None:
         report("Calibrating the venue", 0.08)
         with _stage(cid, "calibrate") as info:
-            pitch = _pitch(meta, bg, cfg)
+            pdeg, psd, vpx, vpy = _pitch(meta, bg, cfg)
             cal = calibrate(bg.mat_mask, meta.height, scale, _focal(meta, cfg),
-                            cfg.rider.stature_m, cfg.rider.chain_fraction, pitch=pitch)
-            info.update(pitch_deg=pitch[0], pitch_sd=pitch[1])
+                            cfg.rider.stature_m, cfg.rider.chain_fraction, pitch=(pdeg, psd),
+                            vp=(vpx, vpy))
+            info.update(pitch_deg=pdeg, pitch_sd=psd, vp=[vpx, vpy])
         store.put_session(session_id, venue, cal, note="auto from first clip of session")
     pitch_deg = cal.pitch_deg if np.isfinite(cal.pitch_deg) else cfg.camera.pitch_deg_fallback
 
@@ -164,6 +170,12 @@ def process(path: Path, cfg: Config | None = None, store: Store | None = None,
                 poses.append(p)
                 idxs.append(fi)
                 times.append(t)
+                retract = getattr(backend, "retract", None)
+                if retract is not None:  # that track turned out not to be the rider
+                    lo, hi = retract
+                    poses = [None if q is not None and lo <= q.frame_idx <= hi else q
+                             for q in poses]
+                    backend.retract = None
                 writer.write(fi, img)
                 report("Tracking the rider", 0.15 + 0.65 * (fi - window.start_frame) / n_det)
                 if p is not None and not airborne:
@@ -190,7 +202,11 @@ def process(path: Path, cfg: Config | None = None, store: Store | None = None,
         store.put_clip(meta, writer.size)
         raise PipelineError("detect", "no_rider_detected", "rider not tracked")
     a = on_mat[0]
-    k_to = find_takeoff(fy_raw[a:], cal.mat_top_y)
+    # The lip tip where this rider leaves: the mat's top edge in the rider's own column (the lip
+    # is not level across the picture, and the mat's highest pixel may be a corner elsewhere).
+    last = on_mat[-1]
+    lip_y = _lip_row_at(bg.mat_mask, scale, _feet_x(poses[last]), cal.mat_top_y)
+    k_to = find_takeoff(fy_raw[a:], lip_y)
     if k_to is not None and k_to >= 10:
         takeoff = a + k_to
         detected = [i for i, p in enumerate(poses) if p is not None]
@@ -208,7 +224,7 @@ def process(path: Path, cfg: Config | None = None, store: Store | None = None,
         jump = None
         if air_from is not None:
             jump = analyze_air(tt, sig.kp, air_from, float(sig.values["range"][air_from - 1]),
-                               sig.takeoff_speed, cal.mat_top_y, pitch_deg, cal.pitch_sd_deg,
+                               sig.takeoff_speed, lip_y, pitch_deg, cal.pitch_sd_deg,
                                cal.focal_px, meta.height / 2, cfg.metrics.keypoint_noise_px)
         return fidx, tt, fps, sig, jump
 
@@ -269,6 +285,8 @@ def process(path: Path, cfg: Config | None = None, store: Store | None = None,
     with _stage(cid, "samples+events") as info:
         samples = fuse(to_samples(sig, spans, run_id, ViewRole.FALL_LINE), None)
         events = detect_events(sig, samples, spans, cfg)
+        transitions = check_edge_transitions(events, samples, sig.frame_idx, sig.t_sec,
+                                             cfg.rider.board_width_m)
         info.update(samples=len(samples), events=len(events))
 
     # ---- persist -----------------------------------------------------------------------------
@@ -297,6 +315,8 @@ def process(path: Path, cfg: Config | None = None, store: Store | None = None,
         "jump": None if jump is None else jump.summary(),
         "stance": sig.stance_info,
         "board_edge_source": {s: int((edge_src == s).sum()) for s in ("board", "feet")},
+        "edge_transitions": transitions,
+        "board_width_m": cfg.rider.board_width_m,
         "events": {"total": len(events),
                    "strong": sum(e.severity == "strong" for e in events)},
         "backend": backend_name,
@@ -329,7 +349,9 @@ def _fuse_board_edge(sig, hits, tt, na, pitch_deg, cal, meta, cfg) -> np.ndarray
     lengths = np.full(n, np.nan)
     for i, h in enumerate(hits):
         if h is not None:
-            raw[i] = roll_from_segment(h.seg, toe_on_right, depression[i])
+            mx, my = (h.seg[0] + h.seg[2]) / 2, (h.seg[1] + h.seg[3]) / 2
+            g = float(gravity_tilt(cal.vp_x, cal.vp_y, np.array(mx), np.array(my)))
+            raw[i] = roll_from_segment(h.seg, toe_on_right, depression[i], g)
             lengths[i] = h.length
     board, err = clean_series(raw, lengths, tt, cfg.metrics.keypoint_noise_px)
     feet_val = sig.values["board_edge"].copy()
@@ -358,10 +380,54 @@ def _fuse_board_edge(sig, hits, tt, na, pitch_deg, cal, meta, cfg) -> np.ndarray
     return src, anchor, half
 
 
+def _match_session(store: Store, base_id: str, bg, meta, scale: float) -> str:
+    """The session (camera setup) this clip belongs to: base_id, base_id-2, ... Two clips share
+    a setup when the mat sits in the same place: same lip row and same left edge, within a
+    couple of percent of the frame."""
+    edge, top, _ = mat_left_edge(bg.mat_mask, meta.height, scale)
+    ids = [r["id"] for r in store.db.execute(
+        "SELECT id FROM session WHERE id = ? OR id LIKE ? ORDER BY id", (base_id, base_id + "-%"))]
+    for sid in ids:
+        cal = store.get_calibration(sid)
+        if cal is None or cal.left_edge_x.size != edge.size:
+            continue
+        both = np.isfinite(edge) & np.isfinite(cal.left_edge_x)
+        if both.sum() < 50:
+            continue
+        d_edge = float(np.median(np.abs(edge[both] - cal.left_edge_x[both])))
+        if abs(top - cal.mat_top_y) <= 0.02 * meta.height and d_edge <= 0.02 * meta.width:
+            return sid
+    if not ids:
+        return base_id
+    k = 2
+    while f"{base_id}-{k}" in ids:
+        k += 1
+    return f"{base_id}-{k}"
+
+
 def _focal(meta, cfg) -> float:
     """Focal length in pixels for this clip: the configured value is for a frame whose long
     edge is `focal_ref_long_edge` px (4K), so it scales with the clip's resolution."""
     return cfg.camera.focal_px * max(meta.width, meta.height) / cfg.camera.focal_ref_long_edge
+
+
+def _feet_x(p: PoseFrame) -> float:
+    return float(np.mean(p.keypoints[[K.L_HEEL, K.R_HEEL, K.L_ANKLE, K.R_ANKLE], 0]))
+
+
+def _lip_row_at(mat_mask: np.ndarray, scale: float, x_full: float, fallback: float,
+                band_frac: float = 0.02) -> float:
+    """Full-res image row of the lip tip at column x: the mat's top edge there (median over a
+    narrow band of columns)."""
+    h, w = mat_mask.shape
+    x = int(np.clip(x_full * scale, 0, w - 1))
+    half = max(2, int(band_frac * w))
+    tops = []
+    for c in range(max(0, x - half), min(w, x + half + 1)):
+        rows = np.flatnonzero(mat_mask[:, c])
+        if rows.size:
+            tops.append(rows[0])
+    return float(np.median(tops) / scale) if tops else float(fallback)
 
 
 def _feet_y(p: PoseFrame) -> float:
@@ -380,20 +446,22 @@ def _air_roi(mat_full: np.ndarray, lip_y: int) -> np.ndarray:
     return roi
 
 
-def _pitch(meta, bg, cfg) -> tuple[float, float]:
+def _pitch(meta, bg, cfg) -> tuple[float, float, float, float]:
     """Camera pitch from a full-resolution median background (vertical vanishing point)."""
     n = cfg.trim.background_samples
     pick = set(np.linspace(0, max(0, meta.n_frames - 20), n).astype(int).tolist())
     frames = [img for fi, _, img in iter_frames(meta) if fi in pick]
     if len(frames) < 3:
-        return float("nan"), float("nan")
+        return float("nan"), float("nan"), float("nan"), float("nan")
     full = np.median(np.stack(frames), axis=0).astype(np.uint8)
     mat = cv2.resize(bg.mat_mask, (meta.width, meta.height), interpolation=cv2.INTER_NEAREST)
     mat = cv2.dilate(mat, np.ones((61, 61), np.uint8))
-    deg, sd, n_in = estimate_pitch(full, mat, _focal(meta, cfg))
+    deg, sd, n_in, vpx, vpy = estimate_pitch(full, mat, _focal(meta, cfg))
+    roll = (float(np.degrees(np.arctan2(vpx - meta.width / 2, vpy - meta.height / 2)))
+            if np.isfinite(vpx) else float("nan"))
     log.info(json.dumps({"clip": meta.clip_id, "stage": "pitch", "deg": deg, "sd": sd,
-                         "inliers": n_in}))
-    return deg, sd
+                         "roll_deg": roll, "inliers": n_in}))
+    return deg, sd, vpx, vpy
 
 
 def detect_events(sig, samples, spans, cfg) -> list:

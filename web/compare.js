@@ -3,6 +3,7 @@
 /* global uPlot */
 import { METRIC_META, PHASE_COLORS } from "./charts.js";
 import { Viewer } from "./viewer.js";
+import { toKmh } from "./store.js";
 
 const A_COLOR = "#38bdf8";
 const B_COLOR = "#f472b6";
@@ -59,6 +60,8 @@ export class CompareView {
     const [cmp, runA, runB] = await Promise.all([
       fetch(`/compare?a=${a}&b=${b}`).then((r) => r.json()), loadRun(a), loadRun(b),
     ]);
+    toKmh(cmp.a.series, { ...cmp.units });
+    toKmh(cmp.b.series, cmp.units);
     this.cmp = cmp; this.runA = runA; this.runB = runB;
     this.viewA = new Viewer(this.root.querySelector("#cmpCanvasA"));
     this.viewB = new Viewer(this.root.querySelector("#cmpCanvasB"));

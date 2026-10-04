@@ -10,6 +10,9 @@ stature_m = 1.75
 chain_fraction = 0.96
 # Distance between binding centres (foot-keypoint centroids). Drives board_yaw.
 stance_width_m = 0.52
+# Board waist width: the yardstick for edge transitions (pure edge roll = the line moves less
+# than one board width).
+board_width_m = 0.25
 # "auto" detects regular/goofy per run (lead foot + toe direction). Force "regular" or "goofy"
 # if you know it; a run ridden switch is then read with that stance.
 stance = "auto"

@@ -7,7 +7,15 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.signal import butter, filtfilt, savgol_filter
 
-from ..calib import RangeModel, edge_x_at, fit_range_model, m_per_px, range_m
+from ..calib import (
+    RangeModel,
+    edge_x_at,
+    fit_range_model,
+    gravity_tilt,
+    m_per_px,
+    range_m,
+    to_gravity,
+)
 from ..contracts import (
     Calibration,
     K,
@@ -163,6 +171,10 @@ def compute_signals(poses: list[PoseFrame | None], frame_idx: np.ndarray, t_sec:
     lf = np.nanmean(kp[:, list(LEFT_FOOT)], axis=1)
     rf = np.nanmean(kp[:, list(RIGHT_FOOT)], axis=1)
     contact = (lf + rf) / 2
+    # The phone is rarely held perfectly level. Gravity's direction in the image (from the
+    # vertical vanishing point) gives the true vertical at the rider, so "up", "sideways" and
+    # "level" below are measured against gravity, not against the picture's edges.
+    phi = gravity_tilt(cal.vp_x, cal.vp_y, contact[:, 0], contact[:, 1])
 
     # 3. scale. Each confidently seen frame gives a body-size range estimate from the
     # crouch-invariant limb chain. Those estimates are too noisy to differentiate directly (the
@@ -216,7 +228,8 @@ def compute_signals(poses: list[PoseFrame | None], frame_idx: np.ndarray, t_sec:
         conf[f"knee_flex_{side}"] = score(hip, knee, ank)
 
     torso = np.linalg.norm(kp[:, K.NECK] - kp[:, K.HIP], axis=1)
-    vals["trunk_lean"] = lean_from_vertical(kp[:, K.HIP], kp[:, K.NECK])
+    trunk_g = to_gravity(kp[:, K.NECK] - kp[:, K.HIP], phi)
+    vals["trunk_lean"] = lean_from_vertical(np.zeros_like(trunk_g), trunk_g)
     errs["trunk_lean"] = np.degrees(np.sqrt(2) * noise / np.maximum(torso, 1))
     conf["trunk_lean"] = score(K.HIP, K.NECK)
 
@@ -224,8 +237,9 @@ def compute_signals(poses: list[PoseFrame | None], frame_idx: np.ndarray, t_sec:
     feet = score(*LEFT_FOOT, *RIGHT_FOOT)
     # Image x is the across-slope axis and is never foreshortened, so it carries the offsets.
     # Image y mixes height with depth, so only vertical extents at the rider's depth are used.
-    dx_com = (com[:, 0] - contact[:, 0]) * s
-    vals["com_height"] = (contact[:, 1] - com[:, 1]) * s
+    rel_g = to_gravity(com - contact, phi)  # CoM relative to the board, gravity-aligned
+    dx_com = rel_g[:, 0] * s
+    vals["com_height"] = -rel_g[:, 1] * s
     vals["com_lateral"] = dx_com
 
     # Board angle to the fall line from the across-slope spread of the feet. The lateral
@@ -257,7 +271,7 @@ def compute_signals(poses: list[PoseFrame | None], frame_idx: np.ndarray, t_sec:
     angs, wts = [], []
     for heel, big, small in ((K.L_HEEL, K.L_BIG_TOE, K.L_SMALL_TOE),
                              (K.R_HEEL, K.R_BIG_TOE, K.R_SMALL_TOE)):
-        v = (kp[:, big] + kp[:, small]) / 2 - kp[:, heel]
+        v = to_gravity((kp[:, big] + kp[:, small]) / 2 - kp[:, heel], phi)
         across = v[:, 0] * toe_sign
         drop = v[:, 1] / np.cos(depression)
         ang = np.degrees(np.arctan2(drop, across))

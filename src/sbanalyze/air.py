@@ -6,7 +6,8 @@ Geometry. A point at range R whose image row is y lies at depression angle
 carried off the lip. No horizontal force acts in flight, so that speed is constant, and it is
 far steadier than body-size range on a rider who is grabbing or rotating.
 
-Height is measured for the board (the lowest foot point) relative to the lip. The camera sees
+Height is measured for the board (the lowest foot point) relative to the lip tip where the
+rider takes off; the air height is the summit of that curve (lip tip -> summit). The camera sees
 the rider from behind, so image rise mixes height with moving away. Pitch is what separates
 them, and its uncertainty is propagated into `err`.
 """
@@ -116,13 +117,24 @@ def analyze(t: np.ndarray, kp: np.ndarray, takeoff: int, r0: float, vh: float, l
     err = np.full(t.size, np.nan)
     err[flight] = np.hypot(np.abs(h_hi - h[flight]), noise_px * rng / focal_px)
     k = flight[int(np.nanargmax(h[flight]))]
+    # Summit: vertex of a parabola fitted over +-0.15 s around the highest frame, so a single
+    # noisy frame cannot set the jump height. Falls back to the highest frame.
+    summit, t_summit = float(h[k]), float(t[k])
+    near = flight[np.abs(t[flight] - t[k]) <= 0.15]
+    near = near[np.isfinite(h[near])]
+    if near.size >= 7:
+        c2, c1, c0 = np.polyfit(t[near] - t[k], h[near], 2)
+        if c2 < 0:
+            tv = -c1 / (2 * c2)
+            if abs(tv) <= 0.15:
+                summit, t_summit = float(c0 - c1 ** 2 / (4 * c2)), float(t[k] + tv)
     desc = np.arange(k, td + 1)
     g_fit = float("nan")
     if desc.size >= 8:
         g_fit = float(-2 * np.polyfit(t[desc] - t[k], h[desc], 2)[0])
     return Jump(
         takeoff=takeoff, touchdown=td, landing_seen=seen, t_takeoff=t0,
-        t_touchdown=float(t[td]), t_apex=float(t[k]), air_time_s=float(t[td] - t0),
-        apex_height_m=float(h[k]), apex_err_m=float(err[k]), takeoff_speed_mps=float(vh),
+        t_touchdown=float(t[td]), t_apex=t_summit, air_time_s=float(t[td] - t0),
+        apex_height_m=summit, apex_err_m=float(err[k]), takeoff_speed_mps=float(vh),
         pitch_deg=float(pitch_deg), g_fit=g_fit, height=h, height_err=err,
     )

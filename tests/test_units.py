@@ -197,3 +197,69 @@ def test_board_edge_roll_sign_and_cleaning():
     raw[20] = 25.0
     val, err = clean_series(raw, np.full(40, 80.0), t, 3.0)
     assert abs(val[20] - 1.0) < 1.5 and np.nanmax(err) < 3
+
+
+def test_gravity_alignment_removes_phone_roll():
+    from sbanalyze.boardedge import roll_from_segment
+    from sbanalyze.calib import gravity_tilt, to_gravity
+
+    # a phone rolled by 3 deg: gravity's vanishing point sits off to the side
+    roll = np.radians(3.0)
+    p = np.array([500.0, 1000.0])
+    vp = p + 20000 * np.array([np.sin(roll), np.cos(roll)])
+    phi = float(gravity_tilt(vp[0], vp[1], p[0], p[1]))
+    assert abs(np.degrees(phi) - 3.0) < 1e-6
+    # a true vertical (along gravity) becomes image-vertical after correction
+    up = -(vp - p) / np.linalg.norm(vp - p)
+    g = to_gravity(up, phi)
+    assert abs(g[0]) < 1e-9 and g[1] < 0
+    # a level board edge, drawn rotated by the phone's roll, reads ~0 after correction
+    d = to_gravity(np.array([1.0, 0.0]), -phi) * 100  # how a level line appears in the image
+    seg = (p[0] - d[0] / 2, p[1] - d[1] / 2, p[0] + d[0] / 2, p[1] + d[1] / 2)
+    assert abs(roll_from_segment(seg, True, 0.0, phi)) < 1e-6
+    assert abs(roll_from_segment(seg, True, 0.0, 0.0)) > 2.5  # uncorrected: the roll leaks in
+
+
+def test_edge_transition_line_shift_against_board_width():
+    from sbanalyze.contracts import MetricSample, Phase, Validity, ViewRole
+    from sbanalyze.events import Event, check_edge_transitions
+
+    t = np.arange(120) / 60
+    frames = np.arange(120)
+
+    def run(shift_m):
+        line = np.where(t < 0.8, 1.0, np.where(t > 1.2, 1.0 + shift_m, 1.0 + shift_m * (t - 0.8) / 0.4))
+        samples = [MetricSample("r", ViewRole.FALL_LINE, int(f), float(tt), Phase.TRANSITION,
+                                "line_offset", float(v), 0.9, 300.0, 0.01, Validity.VALID)
+                   for f, tt, v in zip(frames, t, line)]
+        ev = Event("edge_change", "Edge change", "moderate", "transition", 0.8, 1.2, 1.0,
+                   48, 72, 60, shift_m, 0.0, "Edge change heel → toe: ...")
+        return ev, check_edge_transitions([ev], samples, frames, t, 0.25)
+
+    ev, out = run(0.10)
+    assert out[0]["verdict"] == "ok" and "within one board width" in ev.text
+    ev, out = run(0.60)
+    assert out[0]["verdict"] == "over" and ev.severity == "strong"
+    assert abs(out[0]["board_widths"] - 2.4) < 0.05
+
+
+def test_edge_transition_measures_only_the_crossover():
+    from sbanalyze.contracts import MetricSample, Phase, Validity, ViewRole
+    from sbanalyze.events import Event, check_edge_transitions
+
+    t = np.arange(120) / 60
+    frames = np.arange(120)
+    # CoM: heel side until 0.9 s, crosses to the toe side by 1.1 s
+    th = np.interp(t, [0, 0.9, 1.1, 2], [-0.12, -0.06, 0.06, 0.12])
+    # the line drifts 0.5 m before the crossover (riding across) but only 0.1 m during it
+    line = np.interp(t, [0, 0.9, 1.1, 2], [1.0, 1.5, 1.6, 1.6])
+    mk = lambda metric, vals: [MetricSample("r", ViewRole.FALL_LINE, int(f), float(tt),
+                                            Phase.TRANSITION, metric, float(v), 0.9, 300.0,
+                                            0.01, Validity.VALID)
+                               for f, tt, v in zip(frames, t, vals)]
+    ev = Event("edge_change", "Edge change", "moderate", "transition", 0.0, 1.9, 1.0,
+               0, 115, 60, 0.24, 0.0, "Edge change heel → toe: ...")
+    out = check_edge_transitions([ev], mk("line_offset", line) + mk("com_toe_heel", th),
+                                 frames, t, 0.25)
+    assert 0.85 < out[0]["t_start"] < 0.95 and 1.05 < out[0]["t_end"] < 1.15
+    assert abs(out[0]["shift_m"] - 0.1) < 0.03 and out[0]["verdict"] == "ok"

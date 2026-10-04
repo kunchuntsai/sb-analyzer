@@ -130,9 +130,20 @@ def detect_tail_edge(img: np.ndarray, kp: np.ndarray, min_contrast: float = 12.0
 
 
 def roll_from_segment(seg: tuple[float, float, float, float], toe_on_right: bool,
-                      depression_rad: float) -> float:
-    """Board roll in degrees, + toe edge (toe side lower) / - heel edge."""
+                      depression_rad: float, gravity_rad: float = 0.0) -> float:
+    """Board roll in degrees, + toe edge (toe side lower) / - heel edge.
+
+    `gravity_rad` is how far true down leans from image down at the segment (see
+    calib.gravity_tilt); the segment is rotated into gravity's frame first, so a phone held
+    slightly rolled does not show up as board tilt.
+    """
     x1, y1, x2, y2 = seg
+    if gravity_rad:
+        c, s = np.cos(gravity_rad), np.sin(gravity_rad)
+        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+        hx, hy = (x2 - x1) / 2, (y2 - y1) / 2
+        hx, hy = hx * c - hy * s, hx * s + hy * c
+        x1, y1, x2, y2 = mx - hx, my - hy, mx + hx, my + hy
     # orient the segment from the heel side to the toe side of the picture
     if (x2 - x1 > 0) != toe_on_right:
         x1, y1, x2, y2 = x2, y2, x1, y1
